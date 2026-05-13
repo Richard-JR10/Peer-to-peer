@@ -1,0 +1,58 @@
+services:
+  peer1:
+    build: .
+    container_name: p2p-peer1
+    command: python -m peer
+    environment:
+      PEER_ID: peer1
+      PEER_HOST: 0.0.0.0
+      PEER_ADVERTISE_HOST: peer1
+      PEER_PORT: 9000
+      DISCOVERY_PORT: 9999
+      BOOTSTRAP_PEERS: peer2:9000,peer3:9000
+    ports:
+      - "9001:9000"
+    volumes:
+      - ./data/peer1:/data
+    networks:
+      - p2p-net
+
+  peer2:
+    build: .
+    container_name: p2p-peer2
+    command: python -m peer
+    environment:
+      PEER_ID: peer2
+      PEER_HOST: 0.0.0.0
+      PEER_ADVERTISE_HOST: peer2
+      PEER_PORT: 9000
+      DISCOVERY_PORT: 9999
+      BOOTSTRAP_PEERS: peer1:9000,peer3:9000
+    ports:
+      - "9002:9000"
+    volumes:
+      - ./data/peer2:/data
+    networks:
+      - p2p-net
+
+  peer3:
+    build: .
+    container_name: p2p-peer3
+    command: python -m peer
+    environment:
+      PEER_ID: peer3
+      PEER_HOST: 0.0.0.0
+      PEER_ADVERTISE_HOST: peer3
+      PEER_PORT: 9000
+      DISCOVERY_PORT: 9999
+      BOOTSTRAP_PEERS: peer1:9000,peer2:9000
+    ports:
+      - "9003:9000"
+    volumes:
+      - ./data/peer3:/data
+    networks:
+      - p2p-net
+
+networks:
+  p2p-net:
+    driver: bridge

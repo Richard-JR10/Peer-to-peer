@@ -1,0 +1,5 @@
+.git
+data/*/chunks
+data/*/downloads
+__pycache__
+*.pyc
