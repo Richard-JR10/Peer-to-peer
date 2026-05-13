@@ -3,4 +3,5 @@ __pycache__/
 
 data/*/chunks/
 data/*/downloads/
+data/*/shared/
 data/gui-peer/

@@ -11,7 +11,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -34,11 +33,6 @@ SHARED_DIR = DATA_DIR / "shared"
 CHUNKS_DIR = DATA_DIR / "chunks"
 DOWNLOADS_DIR = DATA_DIR / "downloads"
 GUI_MODE = os.getenv("PEER_GUI_MODE") == "gui"
-GUI_DOCKER_PEER_PORTS = {
-    "peer1": 9001,
-    "peer2": 9002,
-    "peer3": 9003,
-}
 
 LOCK = threading.RLock()
 PEERS = {}
@@ -294,25 +288,59 @@ def should_probe_local_bootstrap():
     return host in {"127.0.0.1", "localhost", "::1"} or host.startswith("127.")
 
 
-def load_bootstrap_peers():
+def bootstrap_peer_candidates():
+    candidates = []
     for value in BOOTSTRAP_PEERS:
         try:
             peer_id, host, port = parse_bootstrap_peer(value)
-            upsert_peer(peer_id, host, port, last_seen=now())
+            candidates.append(
+                {
+                    "peer_id": peer_id,
+                    "host": host,
+                    "port": port,
+                    "last_seen": now(),
+                    "digest": "",
+                    "candidate": True,
+                }
+            )
         except Exception as exc:
             print(f"[{PEER_ID}] ignored bootstrap peer {value}: {exc}", flush=True)
     if should_probe_local_bootstrap():
         try:
             for port in parse_port_range(AUTO_BOOTSTRAP_PORTS):
                 if port != PEER_PORT:
-                    upsert_peer(f"local-{port}", "127.0.0.1", port, last_seen=now())
+                    candidates.append(
+                        {
+                            "peer_id": f"local-{port}",
+                            "host": "127.0.0.1",
+                            "port": port,
+                            "last_seen": now(),
+                            "digest": "",
+                            "candidate": True,
+                        }
+                    )
         except Exception as exc:
             print(f"[{PEER_ID}] ignored AUTO_BOOTSTRAP_PORTS={AUTO_BOOTSTRAP_PORTS}: {exc}", flush=True)
+    return candidates
+
+
+def sync_targets():
+    cleanup_inactive_peers()
+    targets = peers_snapshot()
+    seen_addresses = {(peer.get("host"), int(peer.get("port", 0))) for peer in targets}
+    seen_peer_ids = {peer.get("peer_id") for peer in targets}
+    for candidate in bootstrap_peer_candidates():
+        address = (candidate.get("host"), int(candidate.get("port", 0)))
+        if address in seen_addresses or candidate.get("peer_id") in seen_peer_ids:
+            continue
+        targets.append(candidate)
+        seen_addresses.add(address)
+        seen_peer_ids.add(candidate.get("peer_id"))
+    return targets
 
 
 def peer_url(peer, path):
-    url_peer = gui_bridge_peer(peer)
-    return f"http://{url_peer['host']}:{url_peer['port']}{path}"
+    return f"http://{peer['host']}:{peer['port']}{path}"
 
 
 def peer_chunk_url(peer, file_hash, chunk):
@@ -333,34 +361,10 @@ def fetch_chunk(peer, file_hash, chunk):
     return chunk["index"]
 
 
-def gui_bridge_peer(peer):
-    if not GUI_MODE:
-        return peer
-    host = str(peer.get("host", "")).strip().lower()
-    if int(peer.get("port", 0)) == 9000 and host in GUI_DOCKER_PEER_PORTS:
-        bridged = dict(peer)
-        bridged["host"] = "127.0.0.1"
-        bridged["port"] = GUI_DOCKER_PEER_PORTS[host]
-        return bridged
-    return peer
-
-
 def is_gui_reachable_host(host):
     if not GUI_MODE:
         return True
-    if not host:
-        return False
-    normalized = host.strip().lower()
-    if normalized in GUI_DOCKER_PEER_PORTS:
-        return True
-    if normalized in {"localhost"}:
-        return True
-    try:
-        ip_address(normalized)
-        return True
-    except ValueError:
-        pass
-    return "." in normalized
+    return bool(str(host or "").strip())
 
 
 def peer_lookup():
@@ -538,19 +542,18 @@ def sync_manifest(peer):
         except Exception as exc:
             print(f"[{PEER_ID}] manifest push failed to {peer.get('peer_id')}: {exc}", flush=True)
         actual_peer_id = (manifest.get("peer") or {}).get("peer_id")
-        if actual_peer_id and actual_peer_id != peer.get("peer_id"):
+        if actual_peer_id and actual_peer_id != peer.get("peer_id") and not peer.get("candidate"):
             with LOCK:
                 PEERS.pop(peer.get("peer_id"), None)
     except Exception as exc:
         print(f"[{PEER_ID}] manifest sync failed from {peer.get('peer_id')}: {exc}", flush=True)
-        remove_peer(peer.get("peer_id"))
+        if not peer.get("candidate"):
+            remove_peer(peer.get("peer_id"))
 
 
 def manifest_sync_loop():
     while True:
-        load_bootstrap_peers()
-        cleanup_inactive_peers()
-        peers = peers_snapshot()
+        peers = sync_targets()
         random.shuffle(peers)
         for peer in peers:
             sync_manifest(peer)
@@ -649,7 +652,6 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 def main():
     ensure_dirs()
     publish_shared_files()
-    load_bootstrap_peers()
     threading.Thread(target=discovery_listener_loop, daemon=True).start()
     threading.Thread(target=discovery_broadcast_loop, daemon=True).start()
     threading.Thread(target=manifest_sync_loop, daemon=True).start()

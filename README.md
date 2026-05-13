@@ -8,13 +8,12 @@ The current name and visual branding are temporary. They can be replaced later w
 
 - Trackerless peer-to-peer file sharing
 - LAN peer discovery using UDP broadcast
-- Optional bootstrap peers for Docker, VPNs, or networks that block broadcast
+- Optional bootstrap peers for VPNs or networks that block broadcast
 - File chunking and reconstruction
 - SHA-256 file and chunk verification
 - Parallel chunk downloads
 - Direct peer-to-peer chunk serving over HTTP/TCP
 - Tkinter desktop launcher
-- Docker Compose demo with three peers
 
 ## Requirements
 
@@ -24,17 +23,10 @@ For native desktop usage:
 - Windows, macOS, or Linux
 - No third-party Python packages required
 
-For Docker usage:
-
-- Docker Desktop or Docker Engine
-- Docker Compose
-
 ## Project Structure
 
 ```text
 .
-|-- Dockerfile
-|-- docker-compose.yml
 |-- gui_launcher.py
 |-- README.md
 |-- data/
@@ -51,7 +43,6 @@ Important files:
 - `src/chunking.py`: file splitting, hashing, and reconstruction
 - `src/http_utils.py`: shared JSON HTTP helpers
 - `gui_launcher.py`: desktop GUI launcher
-- `docker-compose.yml`: local three-peer Docker demo
 
 ## How It Works
 
@@ -156,6 +147,7 @@ Data folder: data/gui-peer2
 ```
 
 For local testing, peers advertising `127.0.0.1` automatically probe local ports `9000-9010`, so `Bootstrap peers` can usually stay blank.
+These local probes are internal discovery candidates; only real peers that answer with a manifest are shown in the peer list.
 
 ## Same-Wi-Fi Testing
 
@@ -230,68 +222,6 @@ This laptop IP: 100.90.55.10
 Bootstrap peers: 100.80.12.34:9000
 ```
 
-## Docker Setup
-
-Docker is used for a local backend demo. It starts three peer containers on one machine. The Docker image runs only the peer backend from `src/`; it does not include the desktop GUI.
-
-Build and start the three-peer demo:
-
-```powershell
-docker compose up --build
-```
-
-The peers are exposed on:
-
-```text
-Peer 1: http://localhost:9001
-Peer 2: http://localhost:9002
-Peer 3: http://localhost:9003
-```
-
-Internally, every container listens on TCP `9000`; Docker maps those internal ports to host ports `9001`, `9002`, and `9003`.
-
-Stop the demo:
-
-```powershell
-docker compose down
-```
-
-## Docker Demo Commands
-
-Use `curl.exe` in PowerShell so Windows does not use the `curl` alias for `Invoke-WebRequest`.
-
-The sample file in `data/peer1/shared/` is published automatically when peer 1 starts. After a few seconds, list files known by peer 1:
-
-```powershell
-curl.exe http://localhost:9001/files
-```
-
-List files known by peer 2 after manifest sync:
-
-```powershell
-curl.exe http://localhost:9002/files
-```
-
-Copy the returned `file_hash`, then download from peer 2:
-
-```powershell
-curl.exe -X POST http://localhost:9002/download -H "Content-Type: application/json" -d "{\"file_hash\":\"PASTE_FILE_HASH_HERE\"}"
-```
-
-Download from peer 3:
-
-```powershell
-curl.exe -X POST http://localhost:9003/download -H "Content-Type: application/json" -d "{\"file_hash\":\"PASTE_FILE_HASH_HERE\"}"
-```
-
-Inspect peers and local files:
-
-```powershell
-curl.exe http://localhost:9001/peers
-curl.exe http://localhost:9002/local
-curl.exe http://localhost:9003/local
-```
-
 ## Native HTTP API
 
 Each peer exposes these endpoints:
@@ -328,6 +258,52 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:9000/download" `
   -ContentType "application/json" `
   -Body '{"file_hash":"PASTE_FILE_HASH_HERE"}'
+```
+
+## Native Command-Line Testing
+
+The GUI is the easiest way to run peers, but you can also start peer processes directly.
+
+Start peer 1:
+
+```powershell
+$env:PYTHONPATH="src"
+$env:PEER_ID="peer1"
+$env:PEER_ADVERTISE_HOST="127.0.0.1"
+$env:PEER_PORT="9000"
+$env:DATA_DIR="data/peer1"
+python -m peer
+```
+
+Start peer 2 in a second terminal:
+
+```powershell
+$env:PYTHONPATH="src"
+$env:PEER_ID="peer2"
+$env:PEER_ADVERTISE_HOST="127.0.0.1"
+$env:PEER_PORT="9001"
+$env:DATA_DIR="data/peer2"
+python -m peer
+```
+
+Use `curl.exe` in PowerShell so Windows does not use the `curl` alias for `Invoke-WebRequest`.
+
+List files known by peer 1:
+
+```powershell
+curl.exe http://localhost:9000/files
+```
+
+List files known by peer 2 after manifest sync:
+
+```powershell
+curl.exe http://localhost:9001/files
+```
+
+Copy the returned `file_hash`, then download from peer 2:
+
+```powershell
+curl.exe -X POST http://localhost:9001/download -H "Content-Type: application/json" -d "{\"file_hash\":\"PASTE_FILE_HASH_HERE\"}"
 ```
 
 ## Troubleshooting
@@ -368,19 +344,7 @@ Compile all Python files:
 python -m compileall gui_launcher.py src
 ```
 
-Validate Docker Compose:
-
-```powershell
-docker compose config
-```
-
 ## Cleanup
-
-Stop Docker containers:
-
-```powershell
-docker compose down
-```
 
 Remove generated Python caches if needed:
 
