@@ -301,6 +301,7 @@ def bootstrap_peer_candidates():
                     "last_seen": now(),
                     "digest": "",
                     "candidate": True,
+                    "quiet": False,
                 }
             )
         except Exception as exc:
@@ -317,6 +318,7 @@ def bootstrap_peer_candidates():
                             "last_seen": now(),
                             "digest": "",
                             "candidate": True,
+                            "quiet": True,
                         }
                     )
         except Exception as exc:
@@ -546,7 +548,8 @@ def sync_manifest(peer):
             with LOCK:
                 PEERS.pop(peer.get("peer_id"), None)
     except Exception as exc:
-        print(f"[{PEER_ID}] manifest sync failed from {peer.get('peer_id')}: {exc}", flush=True)
+        if not peer.get("quiet"):
+            print(f"[{PEER_ID}] manifest sync failed from {peer.get('peer_id')}: {exc}", flush=True)
         if not peer.get("candidate"):
             remove_peer(peer.get("peer_id"))
 
