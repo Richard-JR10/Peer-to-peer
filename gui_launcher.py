@@ -150,14 +150,18 @@ class PeerLauncher:
         files_frame = ttk.Frame(self.right)
         files_frame.pack(fill=BOTH, expand=True, pady=(8, 12))
 
-        columns = ("name", "size", "chunks", "peers", "hash")
+        columns = ("status", "name", "size", "chunks", "peers", "hash")
         self.files_tree = ttk.Treeview(files_frame, columns=columns, show="headings", height=11)
+        self.files_tree.tag_configure("downloaded", background="#d1fae5")
+        self.files_tree.tag_configure("partial", background="#fef9c3")
+        self.files_tree.tag_configure("unavailable", foreground="#9ca3af")
         for column, heading, width in (
-            ("name", "Name", 210),
+            ("status", "Status", 100),
+            ("name", "Name", 190),
             ("size", "Size", 80),
             ("chunks", "Chunks", 70),
-            ("peers", "Peers", 70),
-            ("hash", "File hash", 360),
+            ("peers", "Peers", 60),
+            ("hash", "File hash", 340),
         ):
             self.files_tree.heading(column, text=heading)
             self.files_tree.column(column, width=width, anchor="w")
@@ -199,12 +203,9 @@ class PeerLauncher:
         ttk.Button(row, text="Browse", command=self._choose_data_folder).pack(side=LEFT, padx=(6, 0))
 
     def _text_box(self, parent, height):
+        import tkinter as tk
         frame = ttk.Frame(parent)
         frame.pack(fill=BOTH, expand=True)
-        text = ttk.Treeview(frame)
-        text.destroy()
-        import tkinter as tk
-
         widget = tk.Text(frame, height=height, wrap="word", relief="solid", borderwidth=1, font=("Consolas", 9))
         scroll = ttk.Scrollbar(frame, orient=VERTICAL, command=widget.yview)
         widget.configure(yscrollcommand=scroll.set)
@@ -323,12 +324,18 @@ class PeerLauncher:
             shutil.copy2(source, target)
         result = request_json("POST", self._local_peer_url("/publish"), {"path": str(target)})
         self.root.after(0, lambda: self._set_status(f"Published {result['name']}"))
-        self._refresh_all_worker()
+        try:
+            self._refresh_all_worker()
+        except Exception:
+            pass
 
     def _download_worker(self, file_hash):
         result = request_json("POST", self._local_peer_url("/download"), {"file_hash": file_hash})
         self.root.after(0, lambda: self._set_status(f"Downloaded to {result['saved_to']}"))
-        self._refresh_all_worker()
+        try:
+            self._refresh_all_worker()
+        except Exception:
+            pass
 
     def _refresh_all_worker(self):
         if self.process_role == "peer":
@@ -345,14 +352,26 @@ class PeerLauncher:
         self.file_rows = files
         self.files_tree.delete(*self.files_tree.get_children())
         for index, item in enumerate(files):
+            total = len(item.get("chunks", []))
+            local_count = item.get("local_chunks", 0)
+            if local_count == total and total > 0:
+                status, tag = "Downloaded", "downloaded"
+            elif local_count > 0:
+                status, tag = f"Partial ({local_count}/{total})", "partial"
+            elif len(item.get("peers", {})) > 0:
+                status, tag = "Available", ""
+            else:
+                status, tag = "Unavailable", "unavailable"
             self.files_tree.insert(
                 "",
                 END,
                 iid=str(index),
+                tags=(tag,) if tag else (),
                 values=(
+                    status,
                     item.get("name", ""),
                     item.get("size", ""),
-                    len(item.get("chunks", [])),
+                    total,
                     len(item.get("peers", {})),
                     item.get("file_hash", ""),
                 ),
@@ -447,6 +466,9 @@ class PeerLauncher:
             self.log_text.insert(END, line + "\n")
             if "failed" in line.lower() or "error" in line.lower():
                 self.last_error = line
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > 500:
+            self.log_text.delete("1.0", f"{line_count - 500}.0")
         self.log_text.see(END)
         self.log_text.configure(state="disabled")
 

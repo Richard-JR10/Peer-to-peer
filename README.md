@@ -13,7 +13,8 @@ The current name and visual branding are temporary. They can be replaced later w
 - SHA-256 file and chunk verification
 - Parallel chunk downloads
 - Direct peer-to-peer chunk serving over HTTP/TCP
-- Tkinter desktop launcher
+- Downloaded files remain shareable and visible even when the original source goes offline
+- Tkinter desktop launcher with per-file availability status
 
 ## Requirements
 
@@ -85,6 +86,17 @@ When a file is downloaded:
 5. It reconstructs the final file.
 6. It becomes a source for the chunks it now owns.
 
+Downloaded files stay shareable even if the original source peer goes offline. Each peer saves file manifests locally and, on restart, re-advertises any verified chunks still present in its `chunks/` folder.
+
+The Network Files list shows a **Status** for every known file:
+
+| Status | Meaning |
+|--------|---------|
+| Downloaded | All chunks are stored locally; file is available without any peers |
+| Partial | Some chunks are stored locally; remaining chunks need peers |
+| Available | No local chunks; at least one peer is online with the file |
+| Unavailable | No local chunks and no reachable peers; metadata only |
+
 ## Native GUI Setup
 
 Start the desktop launcher from the project folder:
@@ -117,10 +129,11 @@ Use the GUI to:
 - publish files
 - refresh known network files
 - download selected files
-- view local shared/downloaded files
+- view local shared/downloaded files with chunk counts
 - view discovered peers
+- see per-file availability status (Downloaded / Partial / Available / Unavailable)
 
-Files already in the selected data folder's `shared/` directory are published automatically when the service starts.
+Files already in the selected data folder's `shared/` directory are published automatically when the service starts. Empty files (0 bytes) cannot be published.
 
 ## Same-Computer Testing
 
@@ -238,6 +251,8 @@ POST /download
 POST /manifest
 ```
 
+`GET /files` returns a list of all known files. Each entry includes a `local_chunks` field with the count of chunks owned locally by this peer, which can be compared against `chunks` to determine local availability.
+
 Publish a local file:
 
 ```powershell
@@ -335,6 +350,12 @@ If logs show a timeout to an unexpected IP, the peer probably advertised the wro
 ### PowerShell curl error
 
 Use `curl.exe`, not `curl`, or use `Invoke-RestMethod`.
+
+### Cannot publish a file
+
+The publish endpoint rejects empty files (0 bytes). Check that the file has content before publishing.
+
+If publishing fails with a path error, make sure the path uses the correct separator for your OS and that the file exists at that exact path.
 
 ## Development Checks
 

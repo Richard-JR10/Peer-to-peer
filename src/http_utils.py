@@ -9,7 +9,10 @@ def read_json(handler):
     if length == 0:
         return {}
     raw = handler.rfile.read(length)
-    return json.loads(raw.decode("utf-8"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"malformed JSON body: {exc}") from exc
 
 
 def send_json(handler, status, payload):
@@ -36,7 +39,10 @@ def request_json(method, url, payload=None, timeout=5):
             raw = response.read()
             if not raw:
                 return {}
-            return json.loads(raw.decode("utf-8"))
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"malformed JSON response from {url}: {exc}") from exc
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"{method} {url} failed with {exc.code}: {body}") from exc

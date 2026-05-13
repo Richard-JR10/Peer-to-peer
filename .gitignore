@@ -3,5 +3,6 @@ __pycache__/
 
 data/*/chunks/
 data/*/downloads/
+data/*/manifests/
 data/*/shared/
 data/gui-peer/

@@ -32,6 +32,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 SHARED_DIR = DATA_DIR / "shared"
 CHUNKS_DIR = DATA_DIR / "chunks"
 DOWNLOADS_DIR = DATA_DIR / "downloads"
+MANIFESTS_DIR = DATA_DIR / "manifests"
 GUI_MODE = os.getenv("PEER_GUI_MODE") == "gui"
 
 LOCK = threading.RLock()
@@ -47,10 +48,15 @@ def ensure_dirs():
     SHARED_DIR.mkdir(parents=True, exist_ok=True)
     CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def chunk_path(file_hash, index):
     return CHUNKS_DIR / file_hash / f"{index}.chunk"
+
+
+def manifest_path(file_hash):
+    return MANIFESTS_DIR / f"{file_hash}.json"
 
 
 def normalize_chunks(chunks):
@@ -73,6 +79,35 @@ def normalize_owned_chunks(chunks):
 
 def chunk_metadata_matches(existing_chunks, incoming_chunks):
     return normalize_chunks(existing_chunks) == normalize_chunks(incoming_chunks)
+
+
+def persist_file_manifest(file_info):
+    ensure_dirs()
+    manifest = {
+        "file_hash": file_info["file_hash"],
+        "name": file_info["name"],
+        "size": int(file_info["size"]),
+        "chunk_size": int(file_info.get("chunk_size", CHUNK_SIZE)),
+        "chunks": normalize_chunks(file_info["chunks"]),
+    }
+    target = manifest_path(file_info["file_hash"])
+    temp_target = target.with_suffix(".tmp")
+    temp_target.write_text(json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8")
+    temp_target.replace(target)
+
+
+def verified_local_chunks(file_hash, chunks):
+    owned = []
+    for chunk in normalize_chunks(chunks):
+        path = chunk_path(file_hash, chunk["index"])
+        if not path.exists():
+            continue
+        try:
+            if sha256_bytes(path.read_bytes()) == chunk["hash"]:
+                owned.append(chunk["index"])
+        except OSError:
+            continue
+    return owned
 
 
 def upsert_peer(peer_id, host, port, digest=None, last_seen=None):
@@ -98,9 +133,11 @@ def remove_peer(peer_id):
 def cleanup_inactive_peers():
     cutoff = now() - PEER_TTL_SECONDS
     with LOCK:
-        inactive = [peer_id for peer_id, peer in PEERS.items() if peer.get("last_seen", 0) < cutoff]
-    for peer_id in inactive:
-        remove_peer(peer_id)
+        inactive = [pid for pid, p in PEERS.items() if p.get("last_seen", 0) < cutoff]
+        for pid in inactive:
+            PEERS.pop(pid, None)
+            for file_info in CATALOG.values():
+                file_info.get("peers", {}).pop(pid, None)
 
 
 def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chunks):
@@ -129,6 +166,7 @@ def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chun
                 "chunks": owned,
                 "last_seen": now(),
             }
+        persist_file_manifest(file_info)
     return file_hash
 
 
@@ -169,6 +207,7 @@ def catalog_files_snapshot():
                 }
                 for peer_id, owner in file_info.get("peers", {}).items()
             }
+            local_chunks = len(peers.get(PEER_ID, {}).get("chunks", []))
             files.append(
                 {
                     "file_hash": file_info["file_hash"],
@@ -177,6 +216,7 @@ def catalog_files_snapshot():
                     "chunk_size": int(file_info.get("chunk_size", CHUNK_SIZE)),
                     "chunks": normalize_chunks(file_info["chunks"]),
                     "peers": peers,
+                    "local_chunks": local_chunks,
                 }
             )
     return sorted(files, key=lambda item: (item["name"], item["file_hash"]))
@@ -411,12 +451,26 @@ def publish_file(path):
     source = Path(path)
     if not source.exists():
         raise FileNotFoundError(f"{source} does not exist")
+    if source.stat().st_size == 0:
+        raise ValueError(f"{source.name}: cannot publish an empty file")
 
     file_hash = sha256_file(source)
     file_chunk_dir = CHUNKS_DIR / file_hash
+    temp_chunk_dir = CHUNKS_DIR / f"{file_hash}.tmp"
+    old_chunk_dir = CHUNKS_DIR / f"{file_hash}.old"
+
+    if temp_chunk_dir.exists():
+        shutil.rmtree(temp_chunk_dir)
+    chunks = chunk_file(source, temp_chunk_dir)
+
+    # Swap temp dir into place so concurrent /chunk readers are never left with a missing dir.
+    # The rename window is tiny; a reader that hits it gets a transient 404.
     if file_chunk_dir.exists():
-        shutil.rmtree(file_chunk_dir)
-    chunks = chunk_file(source, file_chunk_dir)
+        file_chunk_dir.rename(old_chunk_dir)
+    temp_chunk_dir.rename(file_chunk_dir)
+    if old_chunk_dir.exists():
+        shutil.rmtree(old_chunk_dir)
+
     add_file_to_catalog(
         file_hash,
         source.name,
@@ -449,6 +503,35 @@ def publish_shared_files():
     if not published:
         print(f"[{PEER_ID}] no shared files to auto-publish", flush=True)
     return published
+
+
+def restore_local_manifests():
+    restored = []
+    for path in sorted(MANIFESTS_DIR.glob("*.json")):
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            chunks = normalize_chunks(manifest["chunks"])
+            owned = verified_local_chunks(manifest["file_hash"], chunks)
+            if not owned:
+                continue
+            add_file_to_catalog(
+                manifest["file_hash"],
+                manifest["name"],
+                manifest["size"],
+                chunks,
+                PEER_ID,
+                owned,
+            )
+            restored.append({"name": manifest["name"], "chunks": len(owned)})
+        except Exception as exc:
+            print(f"[{PEER_ID}] ignored saved manifest {path.name}: {exc}", flush=True)
+    for item in restored:
+        print(
+            f"[{PEER_ID}] restored shareable downloaded file {item['name']} "
+            f"({item['chunks']} verified chunks)",
+            flush=True,
+        )
+    return restored
 
 
 def download_file(file_hash):
@@ -485,7 +568,8 @@ def download_file(file_hash):
     if errors:
         raise RuntimeError("; ".join(errors))
 
-    output = assemble_file(CHUNKS_DIR / file_hash, DOWNLOADS_DIR / file_info["name"], file_hash)
+    safe_name = Path(file_info["name"]).name
+    output = assemble_file(CHUNKS_DIR / file_hash, DOWNLOADS_DIR / safe_name, file_hash)
     return {"file_hash": file_hash, "saved_to": str(output), "chunks": sorted(downloaded)}
 
 
@@ -605,7 +689,10 @@ class PeerHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             file_hash = query.get("file_hash", [None])[0]
             index = query.get("index", [None])[0]
-            path = chunk_path(file_hash, int(index)) if file_hash and index is not None else None
+            try:
+                path = chunk_path(file_hash, int(index)) if file_hash and index is not None else None
+            except (ValueError, TypeError):
+                path = None
             if not path or not path.exists():
                 send_json(self, HTTPStatus.NOT_FOUND, {"error": "chunk not found"})
                 return
@@ -654,6 +741,7 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 
 def main():
     ensure_dirs()
+    restore_local_manifests()
     publish_shared_files()
     threading.Thread(target=discovery_listener_loop, daemon=True).start()
     threading.Thread(target=discovery_broadcast_loop, daemon=True).start()
