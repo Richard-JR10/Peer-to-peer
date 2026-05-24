@@ -35,9 +35,18 @@ DOWNLOADS_DIR = DATA_DIR / "downloads"
 MANIFESTS_DIR = DATA_DIR / "manifests"
 GUI_MODE = os.getenv("PEER_GUI_MODE") == "gui"
 
-LOCK = threading.RLock()
+# Fine-grained mutexes: separate locks per resource reduce contention across threads.
+# Acquisition order rule: always PEERS_LOCK before CATALOG_LOCK when both are needed
+# to prevent deadlock (consistent ordering eliminates circular wait).
+PEERS_LOCK = threading.Lock()        # mutual exclusion for the PEERS registry
+CATALOG_LOCK = threading.Lock()      # mutual exclusion for CATALOG and chunk ownership records
 PEERS = {}
 CATALOG = {}
+
+# Per-file download lock registry: one Lock per file_hash so concurrent /download
+# requests for the same file serialize instead of racing on chunk writes and assembly.
+_file_dl_locks: dict = {}
+_file_dl_locks_mu = threading.Lock()    # guards _file_dl_locks dict itself
 
 
 def now():
@@ -113,7 +122,7 @@ def verified_local_chunks(file_hash, chunks):
 def upsert_peer(peer_id, host, port, digest=None, last_seen=None):
     if not peer_id or peer_id == PEER_ID:
         return
-    with LOCK:
+    with PEERS_LOCK:
         PEERS[peer_id] = {
             "peer_id": peer_id,
             "host": host,
@@ -124,26 +133,32 @@ def upsert_peer(peer_id, host, port, digest=None, last_seen=None):
 
 
 def remove_peer(peer_id):
-    with LOCK:
+    # Acquire locks separately (not nested) in the canonical order: PEERS first, CATALOG second.
+    with PEERS_LOCK:
         PEERS.pop(peer_id, None)
+    with CATALOG_LOCK:
         for file_info in CATALOG.values():
             file_info.get("peers", {}).pop(peer_id, None)
 
 
 def cleanup_inactive_peers():
     cutoff = now() - PEER_TTL_SECONDS
-    with LOCK:
+    with PEERS_LOCK:
         inactive = [pid for pid, p in PEERS.items() if p.get("last_seen", 0) < cutoff]
         for pid in inactive:
             PEERS.pop(pid, None)
-            for file_info in CATALOG.values():
-                file_info.get("peers", {}).pop(pid, None)
+    # Only acquire CATALOG_LOCK if there is actually something to clean up.
+    if inactive:
+        with CATALOG_LOCK:
+            for pid in inactive:
+                for file_info in CATALOG.values():
+                    file_info.get("peers", {}).pop(pid, None)
 
 
 def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chunks):
     normalized_chunks = normalize_chunks(chunks)
     owned = normalize_owned_chunks(owned_chunks)
-    with LOCK:
+    with CATALOG_LOCK:
         existing = CATALOG.get(file_hash)
         if existing and not chunk_metadata_matches(existing["chunks"], normalized_chunks):
             raise ValueError(f"conflicting metadata for file {file_hash}")
@@ -166,12 +181,16 @@ def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chun
                 "chunks": owned,
                 "last_seen": now(),
             }
-        persist_file_manifest(file_info)
+        # Snapshot before releasing the lock so persist sees a consistent state.
+        manifest_snapshot = json.loads(json.dumps(file_info))
+    # Persist outside the lock: file I/O under a mutex would block all other threads
+    # waiting on CATALOG_LOCK (chunk downloads, manifest sync, health checks, etc.).
+    persist_file_manifest(manifest_snapshot)
     return file_hash
 
 
 def add_own_chunk(file_hash, chunk):
-    with LOCK:
+    with CATALOG_LOCK:
         file_info = CATALOG.get(file_hash)
         if not file_info:
             return
@@ -196,7 +215,7 @@ def local_peer_entry():
 
 
 def catalog_files_snapshot():
-    with LOCK:
+    with CATALOG_LOCK:
         files = []
         for file_info in CATALOG.values():
             peers = {
@@ -224,13 +243,13 @@ def catalog_files_snapshot():
 
 def peers_snapshot():
     cleanup_inactive_peers()
-    with LOCK:
+    with PEERS_LOCK:
         peers = list(PEERS.values())
     return sorted(peers, key=lambda item: item["peer_id"])
 
 
 def catalog_digest():
-    with LOCK:
+    with CATALOG_LOCK:
         digest_input = []
         for file_hash, file_info in sorted(CATALOG.items()):
             owners = []
@@ -410,7 +429,7 @@ def is_gui_reachable_host(host):
 
 
 def peer_lookup():
-    with LOCK:
+    with PEERS_LOCK:
         return {peer_id: dict(peer) for peer_id, peer in PEERS.items()}
 
 
@@ -534,43 +553,55 @@ def restore_local_manifests():
     return restored
 
 
+def _get_file_download_lock(file_hash):
+    # Double-checked pattern: only create a new Lock when the file_hash is not yet registered.
+    with _file_dl_locks_mu:
+        if file_hash not in _file_dl_locks:
+            _file_dl_locks[file_hash] = threading.Lock()
+        return _file_dl_locks[file_hash]
+
+
 def download_file(file_hash):
     ensure_dirs()
     cleanup_inactive_peers()
-    with LOCK:
+    with CATALOG_LOCK:
         file_info = CATALOG.get(file_hash)
         if not file_info:
             raise FileNotFoundError(f"file {file_hash} is not known by this peer yet")
+        # Deep-copy so the download loop works on a stable snapshot independent of CATALOG_LOCK.
         file_info = json.loads(json.dumps(file_info))
 
-    downloaded = []
-    errors = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {}
-        for position, chunk in enumerate(file_info["chunks"]):
-            local_chunk = chunk_path(file_hash, chunk["index"])
-            if local_chunk.exists() and sha256_bytes(local_chunk.read_bytes()) == chunk["hash"]:
-                add_own_chunk(file_hash, chunk)
-                downloaded.append(chunk["index"])
-                continue
-            candidates = peers_for_chunk(file_info, chunk["index"], position)
-            if not candidates:
-                errors.append(f"no peer available for chunk {chunk['index']}")
-                continue
-            futures[executor.submit(fetch_chunk_from_candidates, candidates, file_hash, chunk)] = chunk["index"]
+    # Per-file mutex: serializes concurrent /download requests for the same file so that
+    # chunk writes and the final assembled output file are never written simultaneously.
+    with _get_file_download_lock(file_hash):
+        downloaded = []
+        errors = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {}
+            for position, chunk in enumerate(file_info["chunks"]):
+                local_chunk = chunk_path(file_hash, chunk["index"])
+                if local_chunk.exists() and sha256_bytes(local_chunk.read_bytes()) == chunk["hash"]:
+                    add_own_chunk(file_hash, chunk)
+                    downloaded.append(chunk["index"])
+                    continue
+                candidates = peers_for_chunk(file_info, chunk["index"], position)
+                if not candidates:
+                    errors.append(f"no peer available for chunk {chunk['index']}")
+                    continue
+                futures[executor.submit(fetch_chunk_from_candidates, candidates, file_hash, chunk)] = chunk["index"]
 
-        for future in as_completed(futures):
-            try:
-                downloaded.append(future.result())
-            except Exception as exc:
-                errors.append(str(exc))
+            for future in as_completed(futures):
+                try:
+                    downloaded.append(future.result())
+                except Exception as exc:
+                    errors.append(str(exc))
 
-    if errors:
-        raise RuntimeError("; ".join(errors))
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
-    safe_name = Path(file_info["name"]).name
-    output = assemble_file(CHUNKS_DIR / file_hash, DOWNLOADS_DIR / safe_name, file_hash)
-    return {"file_hash": file_hash, "saved_to": str(output), "chunks": sorted(downloaded)}
+        safe_name = Path(file_info["name"]).name
+        output = assemble_file(CHUNKS_DIR / file_hash, DOWNLOADS_DIR / safe_name, file_hash)
+        return {"file_hash": file_hash, "saved_to": str(output), "chunks": sorted(downloaded)}
 
 
 def discovery_message():
@@ -629,7 +660,7 @@ def sync_manifest(peer):
             print(f"[{PEER_ID}] manifest push failed to {peer.get('peer_id')}: {exc}", flush=True)
         actual_peer_id = (manifest.get("peer") or {}).get("peer_id")
         if actual_peer_id and actual_peer_id != peer.get("peer_id") and not peer.get("candidate"):
-            with LOCK:
+            with PEERS_LOCK:
                 PEERS.pop(peer.get("peer_id"), None)
     except Exception as exc:
         if not peer.get("quiet"):
@@ -724,6 +755,29 @@ class PeerHandler(BaseHTTPRequestHandler):
                 manifest = prefer_observed_peer_host(read_json(self), self.client_address[0])
                 merge_manifest(manifest, "manifest push")
                 send_json(self, HTTPStatus.OK, {"ok": True})
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/upload":
+            try:
+                query = parse_qs(parsed.query)
+                raw_name = query.get("name", [""])[0].strip()
+                safe_name = Path(raw_name).name
+                if not safe_name:
+                    send_json(self, HTTPStatus.BAD_REQUEST, {"error": "?name= query param required"})
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if length == 0:
+                    send_json(self, HTTPStatus.BAD_REQUEST, {"error": "empty upload"})
+                    return
+                data = self.rfile.read(length)
+                ensure_dirs()
+                tmp_path = SHARED_DIR / (safe_name + ".upload.tmp")
+                target_path = SHARED_DIR / safe_name
+                tmp_path.write_bytes(data)
+                tmp_path.replace(target_path)
+                result = publish_file(target_path)
+                send_json(self, HTTPStatus.OK, result)
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return

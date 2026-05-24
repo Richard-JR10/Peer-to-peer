@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
 
+# frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# runtime
+peer.log
 data/*/chunks/
 data/*/downloads/
 data/*/manifests/
