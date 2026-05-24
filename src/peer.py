@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from chunking import CHUNK_SIZE, assemble_file, chunk_file, sha256_bytes, sha256_file
+from crypto import derive_key, encrypt, decrypt
 from http_utils import not_found, read_json, request_json, send_json
 
 
@@ -24,6 +25,8 @@ PEER_ADVERTISE_HOST = os.getenv("PEER_ADVERTISE_HOST", PEER_HOST)
 PEER_PORT = int(os.getenv("PEER_PORT", "9000"))
 DISCOVERY_PORT = int(os.getenv("DISCOVERY_PORT", "9999"))
 BOOTSTRAP_PEERS = [item.strip() for item in os.getenv("BOOTSTRAP_PEERS", "").split(",") if item.strip()]
+PEER_PASSPHRASE = os.getenv("PEER_PASSPHRASE", "")
+ENCRYPTION_KEY = derive_key(PEER_PASSPHRASE) if PEER_PASSPHRASE else None
 AUTO_BOOTSTRAP_PORTS = os.getenv("AUTO_BOOTSTRAP_PORTS", "9000-9010")
 PEER_TTL_SECONDS = int(os.getenv("PEER_TTL_SECONDS", "45"))
 HELLO_INTERVAL_SECONDS = int(os.getenv("HELLO_INTERVAL_SECONDS", "5"))
@@ -42,6 +45,9 @@ PEERS_LOCK = threading.Lock()        # mutual exclusion for the PEERS registry
 CATALOG_LOCK = threading.Lock()      # mutual exclusion for CATALOG and chunk ownership records
 PEERS = {}
 CATALOG = {}
+
+MESSAGES: list = []
+MESSAGES_LOCK = threading.Lock()
 
 # Per-file download lock registry: one Lock per file_hash so concurrent /download
 # requests for the same file serialize instead of racing on chunk writes and assembly.
@@ -411,7 +417,8 @@ def peer_chunk_url(peer, file_hash, chunk):
 def fetch_chunk(peer, file_hash, chunk):
     url = peer_chunk_url(peer, file_hash, chunk)
     payload = request_json("GET", url, timeout=10)
-    data = base64.b64decode(payload["data"].encode("ascii"))
+    raw = base64.b64decode(payload["data"].encode("ascii"))
+    data = decrypt(raw, ENCRYPTION_KEY) if ENCRYPTION_KEY else raw
     actual_hash = sha256_bytes(data)
     if actual_hash != chunk["hash"]:
         raise ValueError(f"chunk {chunk['index']} failed hash check")
@@ -745,8 +752,16 @@ class PeerHandler(BaseHTTPRequestHandler):
             if not path or not path.exists():
                 send_json(self, HTTPStatus.NOT_FOUND, {"error": "chunk not found"})
                 return
-            data = base64.b64encode(path.read_bytes()).decode("ascii")
+            raw = path.read_bytes()
+            if ENCRYPTION_KEY:
+                raw = encrypt(raw, ENCRYPTION_KEY)
+            data = base64.b64encode(raw).decode("ascii")
             send_json(self, HTTPStatus.OK, {"file_hash": file_hash, "index": int(index), "data": data})
+            return
+        if parsed.path == "/messages":
+            with MESSAGES_LOCK:
+                msgs = list(MESSAGES)
+            send_json(self, HTTPStatus.OK, {"messages": msgs})
             return
         not_found(self)
 
@@ -796,6 +811,66 @@ class PeerHandler(BaseHTTPRequestHandler):
                 tmp_path.replace(target_path)
                 result = publish_file(target_path)
                 send_json(self, HTTPStatus.OK, result)
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/delete":
+            try:
+                payload = read_json(self)
+                file_hash = payload.get("file_hash", "").strip()
+                if not file_hash:
+                    send_json(self, HTTPStatus.BAD_REQUEST, {"error": "file_hash required"})
+                    return
+                with CATALOG_LOCK:
+                    if file_hash not in CATALOG:
+                        send_json(self, HTTPStatus.NOT_FOUND, {"error": "file not known"})
+                        return
+                    CATALOG.pop(file_hash)
+                chunk_dir = CHUNKS_DIR / file_hash
+                if chunk_dir.exists():
+                    shutil.rmtree(chunk_dir)
+                manifest_path(file_hash).unlink(missing_ok=True)
+                send_json(self, HTTPStatus.OK, {"ok": True, "file_hash": file_hash})
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/message":
+            try:
+                payload = read_json(self)
+                from_peer = str(payload.get("from_peer", "?"))
+                encrypted_hex = str(payload.get("text", ""))
+                raw = bytes.fromhex(encrypted_hex)
+                text = decrypt(raw, ENCRYPTION_KEY).decode("utf-8") if ENCRYPTION_KEY else raw.decode("utf-8")
+                with MESSAGES_LOCK:
+                    MESSAGES.append({
+                        "from_peer": from_peer,
+                        "text": text,
+                        "timestamp": now(),
+                    })
+                send_json(self, HTTPStatus.OK, {"ok": True})
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/send_message":
+            try:
+                payload = read_json(self)
+                to_peer_id = payload.get("to_peer_id", "").strip()
+                text = payload.get("text", "").strip()
+                if not to_peer_id or not text:
+                    send_json(self, HTTPStatus.BAD_REQUEST, {"error": "to_peer_id and text required"})
+                    return
+                with PEERS_LOCK:
+                    peer = PEERS.get(to_peer_id)
+                if not peer:
+                    send_json(self, HTTPStatus.NOT_FOUND, {"error": f"peer {to_peer_id!r} not known"})
+                    return
+                raw = text.encode("utf-8")
+                encrypted_hex = encrypt(raw, ENCRYPTION_KEY).hex() if ENCRYPTION_KEY else raw.hex()
+                request_json("POST", peer_url(peer, "/message"), {
+                    "from_peer": PEER_ID,
+                    "text": encrypted_hex,
+                }, timeout=5)
+                send_json(self, HTTPStatus.OK, {"ok": True})
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return

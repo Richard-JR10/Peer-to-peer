@@ -6,10 +6,12 @@ REM  Run: start.bat
 REM ============================================================
 
 set PEER_ID=Richard
-set PEER_ADVERTISE_HOST=10.175.77.43
+set PEER_ADVERTISE_HOST=100.102.71.92
 set PEER_PORT=9000
 set DISCOVERY_PORT=9999
 set DATA_DIR=data\peer1
+set BOOTSTRAP_PEERS=
+set PEER_PASSPHRASE=pdc-demo-key
 
 REM ============================================================
 

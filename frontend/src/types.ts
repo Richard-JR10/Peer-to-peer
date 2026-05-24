@@ -55,6 +55,12 @@ export interface DownloadResult {
   chunks: number[]
 }
 
+export interface Message {
+  from_peer: string
+  text: string
+  timestamp: number
+}
+
 export type FileStatus = 'Downloaded' | 'Partial' | 'Available' | 'Unavailable'
 
 export function getFileStatus(file: NetworkFile): FileStatus {

@@ -1,25 +1,28 @@
 import { useRef, useState } from 'react'
 
 interface UploadZoneProps {
-  onUpload: (file: File) => Promise<void>
+  onUpload: (file: File, onProgress?: (pct: number) => void) => Promise<void>
 }
 
 export default function UploadZone({ onUpload }: UploadZoneProps) {
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [uploadPct, setUploadPct] = useState(0)
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handle = async (file: File) => {
     setUploading(true)
+    setUploadPct(0)
     setMessage(null)
     try {
-      await onUpload(file)
+      await onUpload(file, (pct) => setUploadPct(pct))
       setMessage({ text: `"${file.name}" published to network`, ok: true })
     } catch (err) {
       setMessage({ text: String(err), ok: false })
     } finally {
       setUploading(false)
+      setUploadPct(0)
     }
   }
 
@@ -70,9 +73,21 @@ export default function UploadZone({ onUpload }: UploadZoneProps) {
       )}
 
       <p className={`text-sm font-medium ${dragging ? 'text-accent' : 'text-slate-400'}`}>
-        {uploading ? 'Publishing…' : dragging ? 'Drop to publish' : 'Drop a file or click to browse'}
+        {uploading ? `Publishing… ${uploadPct}%` : dragging ? 'Drop to publish' : 'Drop a file or click to browse'}
       </p>
       <p className="text-xs text-slate-600 mt-1">File will be shared with all peers automatically</p>
+
+      {/* Upload progress bar */}
+      {uploading && (
+        <div className="mt-3 w-full max-w-xs">
+          <div className="h-1.5 rounded bg-slate-800 overflow-hidden">
+            <div
+              className="h-full bg-accent transition-all duration-200"
+              style={{ width: `${uploadPct}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {message && (
         <div className={`mt-3 text-xs px-3 py-1.5 rounded ${

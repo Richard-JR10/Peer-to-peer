@@ -1,20 +1,24 @@
-import { useState, useCallback } from 'react'
-import { getHealth, getFiles, getPeers, getLocal, postDownload, postUpload } from './api'
+import { useState, useCallback, useEffect } from 'react'
+import { getHealth, getFiles, getPeers, getLocal, postDownload, postUpload, deleteFile, getMessages, sendMessage } from './api'
 import { usePolling } from './hooks/usePolling'
-import type { HealthResponse, NetworkFile, Peer, LocalFiles } from './types'
+import type { HealthResponse, NetworkFile, Peer, LocalFiles, Message } from './types'
 import Header from './components/Header'
 import FileTable from './components/FileTable'
 import UploadZone from './components/UploadZone'
 import PeersPanel from './components/PeersPanel'
 import LocalPanel from './components/LocalPanel'
+import MessagingPanel from './components/MessagingPanel'
 
 export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [files, setFiles] = useState<NetworkFile[]>([])
   const [peers, setPeers] = useState<Peer[]>([])
   const [local, setLocal] = useState<LocalFiles | null>(null)
+  const [messages, setMessages] = useState<Message[]>([])
   const [downloading, setDownloading] = useState<Set<string>>(new Set())
   const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null)
+  const [search, setSearch] = useState('')
+  const [fastPoll, setFastPoll] = useState(false)
 
   const showToast = (text: string, ok: boolean) => {
     setToast({ text, ok })
@@ -45,8 +49,21 @@ export default function App() {
     }
   }, [])
 
+  const fetchMessages = useCallback(async () => {
+    try {
+      const res = await getMessages()
+      setMessages(res.messages)
+    } catch { /* ignore */ }
+  }, [])
+
   usePolling(fetchHealth, 2000)
-  usePolling(fetchAll, 3000)
+  usePolling(fetchAll, fastPoll ? 500 : 3000)
+  usePolling(fetchMessages, 2000)
+
+  // Speed up polling while a download is in progress so the progress bar updates smoothly
+  useEffect(() => {
+    setFastPoll(downloading.size > 0)
+  }, [downloading])
 
   const handleDownload = async (hash: string) => {
     setDownloading((prev) => new Set([...prev, hash]))
@@ -65,12 +82,29 @@ export default function App() {
     }
   }
 
-  const handleUpload = async (file: File) => {
-    await postUpload(file)
+  const handleUpload = async (file: File, onProgress?: (pct: number) => void) => {
+    await postUpload(file, onProgress)
     await fetchAll()
   }
 
+  const handleSend = async (to_peer_id: string, text: string) => {
+    await sendMessage(to_peer_id, text)
+  }
+
+  const handleDelete = async (hash: string) => {
+    try {
+      await deleteFile(hash)
+      await fetchAll()
+      showToast('File removed', true)
+    } catch (err) {
+      showToast(String(err), false)
+    }
+  }
+
   const connected = health?.status === 'ok'
+  const visibleFiles = files.filter(f =>
+    f.name.toLowerCase().includes(search.toLowerCase())
+  )
 
   return (
     <div className="min-h-screen bg-black flex flex-col">
@@ -88,17 +122,26 @@ export default function App() {
           <div className="flex flex-col gap-6">
             {/* Network files */}
             <div className="rounded-lg border border-border bg-card">
-              <div className="flex items-center justify-between border-b border-border px-4 py-3">
-                <h2 className="text-sm font-semibold text-white uppercase tracking-wider">
+              <div className="flex items-center justify-between border-b border-border px-4 py-3 gap-3">
+                <h2 className="text-sm font-semibold text-white uppercase tracking-wider shrink-0">
                   Network Files
                 </h2>
-                <span className="text-xs text-slate-600">{files.length} total</span>
+                <input
+                  type="text"
+                  placeholder="Search files…"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  className="flex-1 max-w-xs rounded bg-surface border border-border px-3 py-1 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-accent"
+                />
+                <span className="text-xs text-slate-600 shrink-0">{visibleFiles.length} / {files.length}</span>
               </div>
               <div className="p-1">
                 <FileTable
-                  files={files}
+                  files={visibleFiles}
                   downloading={downloading}
                   onDownload={handleDownload}
+                  onDelete={handleDelete}
+                  peerId={health?.peer_id ?? ''}
                 />
               </div>
             </div>
@@ -111,6 +154,7 @@ export default function App() {
           <div className="flex flex-col gap-6">
             <PeersPanel peers={peers} />
             <LocalPanel local={local} />
+            <MessagingPanel peers={peers} messages={messages} onSend={handleSend} />
           </div>
         </div>
       </main>

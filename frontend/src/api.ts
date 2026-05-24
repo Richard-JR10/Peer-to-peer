@@ -5,6 +5,7 @@ import type {
   LocalFiles,
   UploadResult,
   DownloadResult,
+  Message,
 } from './types'
 
 const BASE = '/api'
@@ -37,11 +38,44 @@ export const postDownload = (file_hash: string): Promise<DownloadResult> =>
     body: JSON.stringify({ file_hash }),
   })
 
-export const postUpload = (file: File): Promise<UploadResult> => {
-  const params = new URLSearchParams({ name: file.name })
-  return apiFetch(`/upload?${params}`, {
+export const deleteFile = (file_hash: string): Promise<{ ok: boolean }> =>
+  apiFetch('/delete', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: file,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_hash }),
+  })
+
+export const getMessages = (): Promise<{ messages: Message[] }> =>
+  apiFetch('/messages')
+
+export const sendMessage = (to_peer_id: string, text: string): Promise<{ ok: boolean }> =>
+  apiFetch('/send_message', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to_peer_id, text }),
+  })
+
+export function postUpload(
+  file: File,
+  onProgress?: (pct: number) => void
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${BASE}/upload?name=${encodeURIComponent(file.name)}`)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    }
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText)
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data)
+        else reject(new Error(data.error ?? xhr.statusText))
+      } catch { reject(new Error(xhr.statusText)) }
+    }
+    xhr.onerror = () => reject(new Error('Upload failed'))
+    xhr.send(file)
   })
 }
