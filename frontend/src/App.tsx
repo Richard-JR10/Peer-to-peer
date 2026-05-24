@@ -52,7 +52,11 @@ export default function App() {
   const fetchMessages = useCallback(async () => {
     try {
       const res = await getMessages()
-      setMessages(res.messages)
+      setMessages(prev => {
+        const sent = prev.filter(m => m.direction === 'sent')
+        const received = res.messages.map(m => ({ ...m, direction: 'received' as const }))
+        return [...sent, ...received].sort((a, b) => a.timestamp - b.timestamp)
+      })
     } catch { /* ignore */ }
   }, [])
 
@@ -88,6 +92,14 @@ export default function App() {
   }
 
   const handleSend = async (to_peer_id: string, text: string) => {
+    const optimistic: Message = {
+      from_peer: health?.peer_id ?? 'me',
+      to_peer: to_peer_id,
+      text,
+      timestamp: Math.floor(Date.now() / 1000),
+      direction: 'sent',
+    }
+    setMessages(prev => [...prev, optimistic])
     await sendMessage(to_peer_id, text)
   }
 
@@ -154,7 +166,7 @@ export default function App() {
           <div className="flex flex-col gap-6">
             <PeersPanel peers={peers} />
             <LocalPanel local={local} />
-            <MessagingPanel peers={peers} messages={messages} onSend={handleSend} />
+            <MessagingPanel peers={peers} messages={messages} myPeerId={health?.peer_id ?? ''} onSend={handleSend} />
           </div>
         </div>
       </main>

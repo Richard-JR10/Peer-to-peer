@@ -57,8 +57,10 @@ export interface DownloadResult {
 
 export interface Message {
   from_peer: string
+  to_peer?: string
   text: string
   timestamp: number
+  direction: 'sent' | 'received'
 }
 
 export type FileStatus = 'Downloaded' | 'Partial' | 'Available' | 'Unavailable'

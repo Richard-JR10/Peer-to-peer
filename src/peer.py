@@ -45,6 +45,9 @@ PEERS_LOCK = threading.Lock()        # mutual exclusion for the PEERS registry
 CATALOG_LOCK = threading.Lock()      # mutual exclusion for CATALOG and chunk ownership records
 PEERS = {}
 CATALOG = {}
+# Hashes explicitly deleted by this peer; merge_manifest skips them so peers
+# cannot resurrect files the user has chosen to remove.
+DELETED_HASHES: set = set()
 
 MESSAGES: list = []
 MESSAGES_LOCK = threading.Lock()
@@ -162,6 +165,8 @@ def cleanup_inactive_peers():
 
 
 def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chunks):
+    if file_hash in DELETED_HASHES:
+        return file_hash
     normalized_chunks = normalize_chunks(chunks)
     owned = normalize_owned_chunks(owned_chunks)
     with CATALOG_LOCK:
@@ -826,6 +831,7 @@ class PeerHandler(BaseHTTPRequestHandler):
                         send_json(self, HTTPStatus.NOT_FOUND, {"error": "file not known"})
                         return
                     CATALOG.pop(file_hash)
+                DELETED_HASHES.add(file_hash)
                 chunk_dir = CHUNKS_DIR / file_hash
                 if chunk_dir.exists():
                     shutil.rmtree(chunk_dir)
