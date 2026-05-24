@@ -115,7 +115,8 @@ export default function App() {
 
   const connected = health?.status === 'ok'
   const visibleFiles = files.filter(f =>
-    f.name.toLowerCase().includes(search.toLowerCase())
+    f.name.toLowerCase().includes(search.toLowerCase()) &&
+    (f.local_chunks > 0 || Object.keys(f.peers).length > 0)
   )
 
   return (

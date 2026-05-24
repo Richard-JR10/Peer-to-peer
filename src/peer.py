@@ -281,8 +281,9 @@ def build_manifest():
 
 def merge_manifest(manifest, source_peer=None):
     peer = manifest.get("peer") or {}
+    advertising_peer_id = peer.get("peer_id")
     if peer:
-        upsert_peer(peer.get("peer_id"), peer.get("host"), peer.get("port"), peer.get("digest"))
+        upsert_peer(advertising_peer_id, peer.get("host"), peer.get("port"), peer.get("digest"))
 
     for known_peer in manifest.get("peers", []):
         upsert_peer(
@@ -292,6 +293,13 @@ def merge_manifest(manifest, source_peer=None):
             known_peer.get("digest"),
             known_peer.get("last_seen"),
         )
+
+    # Collect hashes that the advertising peer currently claims ownership of.
+    advertised_hashes = set()
+    for file_info in manifest.get("files", []):
+        owners = file_info.get("peers", {})
+        if advertising_peer_id and advertising_peer_id in owners and owners[advertising_peer_id].get("chunks"):
+            advertised_hashes.add(file_info["file_hash"])
 
     for file_info in manifest.get("files", []):
         for peer_id, owner in file_info.get("peers", {}).items():
@@ -306,6 +314,15 @@ def merge_manifest(manifest, source_peer=None):
                 )
             except ValueError as exc:
                 print(f"[{PEER_ID}] rejected metadata from {source_peer or 'peer'}: {exc}", flush=True)
+
+    # Remove the advertising peer from any files it is no longer claiming.
+    # This ensures deletions propagate: once a peer stops advertising a file,
+    # other peers stop listing it as a source within one sync cycle.
+    if advertising_peer_id:
+        with CATALOG_LOCK:
+            for file_hash, file_info in CATALOG.items():
+                if advertising_peer_id in file_info.get("peers", {}) and file_hash not in advertised_hashes:
+                    file_info["peers"].pop(advertising_peer_id, None)
 
 
 def prefer_observed_peer_host(manifest, observed_host):
