@@ -638,13 +638,31 @@ def discovery_listener_loop():
             print(f"[{PEER_ID}] discovery receive failed: {exc}", flush=True)
 
 
+def broadcast_targets():
+    targets = ["255.255.255.255"]
+    # Also send a directed subnet broadcast so mobile hotspots (which often
+    # block 255.255.255.255) still forward the packet to all connected devices.
+    host = PEER_ADVERTISE_HOST.strip()
+    if host and not host.startswith("127."):
+        parts = host.split(".")
+        if len(parts) == 4:
+            subnet_bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+            if subnet_bcast not in targets:
+                targets.append(subnet_bcast)
+    return targets
+
+
 def discovery_broadcast_loop():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     while True:
         try:
             raw = json.dumps(discovery_message()).encode("utf-8")
-            sock.sendto(raw, ("255.255.255.255", DISCOVERY_PORT))
+            for target in broadcast_targets():
+                try:
+                    sock.sendto(raw, (target, DISCOVERY_PORT))
+                except Exception as exc:
+                    print(f"[{PEER_ID}] broadcast to {target} failed: {exc}", flush=True)
         except Exception as exc:
             print(f"[{PEER_ID}] discovery broadcast failed: {exc}", flush=True)
         time.sleep(HELLO_INTERVAL_SECONDS)
