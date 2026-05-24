@@ -55,6 +55,20 @@ export const sendMessage = (to_peer_id: string, text: string): Promise<{ ok: boo
     body: JSON.stringify({ to_peer_id, text }),
   })
 
+export const stopSharing = (file_hash: string): Promise<{ ok: boolean }> =>
+  apiFetch('/stop_sharing', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_hash }),
+  })
+
+export const resumeSharing = (file_hash: string): Promise<{ ok: boolean }> =>
+  apiFetch('/resume_sharing', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_hash }),
+  })
+
 export function postUpload(
   file: File,
   onProgress?: (pct: number) => void,

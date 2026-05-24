@@ -48,6 +48,9 @@ CATALOG = {}
 # Hashes explicitly deleted by this peer; merge_manifest skips them so peers
 # cannot resurrect files the user has chosen to remove.
 DELETED_HASHES: set = set()
+# Hashes where this peer has voluntarily stopped serving chunks.
+# Does not delete files — reversible via /resume_sharing.
+SHARING_PAUSED: set = set()
 
 MESSAGES: list = []
 MESSAGES_LOCK = threading.Lock()
@@ -238,6 +241,8 @@ def catalog_files_snapshot():
     with CATALOG_LOCK:
         files = []
         for file_info in CATALOG.values():
+            fh = file_info["file_hash"]
+            paused = fh in SHARING_PAUSED
             peers = {
                 peer_id: {
                     "peer_id": peer_id,
@@ -245,11 +250,17 @@ def catalog_files_snapshot():
                     "last_seen": int(owner.get("last_seen", 0)),
                 }
                 for peer_id, owner in file_info.get("peers", {}).items()
+                if not (peer_id == PEER_ID and paused)
             }
-            local_chunks = len(peers.get(PEER_ID, {}).get("chunks", []))
+            # local_chunks reflects disk reality regardless of pause state
+            local_chunks = len(
+                normalize_owned_chunks(
+                    file_info.get("peers", {}).get(PEER_ID, {}).get("chunks", [])
+                )
+            )
             files.append(
                 {
-                    "file_hash": file_info["file_hash"],
+                    "file_hash": fh,
                     "name": file_info["name"],
                     "size": int(file_info["size"]),
                     "chunk_size": int(file_info.get("chunk_size", CHUNK_SIZE)),
@@ -258,6 +269,7 @@ def catalog_files_snapshot():
                     "local_chunks": local_chunks,
                     "allowed_peers": list(file_info.get("allowed_peers", [])),
                     "password_protected": bool(file_info.get("password_protected", False)),
+                    "sharing_paused": paused,
                 }
             )
     return sorted(files, key=lambda item: (item["name"], item["file_hash"]))
@@ -801,8 +813,12 @@ class PeerHandler(BaseHTTPRequestHandler):
             with CATALOG_LOCK:
                 _fi = CATALOG.get(file_hash)
                 _allowed = list(_fi.get("allowed_peers", [])) if _fi else []
+                _paused = file_hash in SHARING_PAUSED
             if _allowed and requesting_peer_id not in _allowed:
                 send_json(self, HTTPStatus.FORBIDDEN, {"error": "access denied"})
+                return
+            if _paused:
+                send_json(self, HTTPStatus.FORBIDDEN, {"error": "sharing paused for this file"})
                 return
             try:
                 path = chunk_path(file_hash, int(index)) if file_hash and index is not None else None
@@ -940,6 +956,29 @@ class PeerHandler(BaseHTTPRequestHandler):
                     "from_peer": PEER_ID,
                     "text": encrypted_hex,
                 }, timeout=5)
+                send_json(self, HTTPStatus.OK, {"ok": True})
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/stop_sharing":
+            try:
+                payload = read_json(self)
+                file_hash = payload.get("file_hash", "").strip()
+                with CATALOG_LOCK:
+                    if file_hash not in CATALOG:
+                        send_json(self, HTTPStatus.NOT_FOUND, {"error": "file not known"})
+                        return
+                    SHARING_PAUSED.add(file_hash)
+                send_json(self, HTTPStatus.OK, {"ok": True})
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/resume_sharing":
+            try:
+                payload = read_json(self)
+                file_hash = payload.get("file_hash", "").strip()
+                with CATALOG_LOCK:
+                    SHARING_PAUSED.discard(file_hash)
                 send_json(self, HTTPStatus.OK, {"ok": True})
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})

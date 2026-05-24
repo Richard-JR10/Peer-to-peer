@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { getHealth, getFiles, getPeers, getLocal, postDownload, postUpload, deleteFile, getMessages, sendMessage } from './api'
+import { getHealth, getFiles, getPeers, getLocal, postDownload, postUpload, deleteFile, getMessages, sendMessage, stopSharing, resumeSharing } from './api'
 import { usePolling } from './hooks/usePolling'
 import type { HealthResponse, NetworkFile, Peer, LocalFiles, Message } from './types'
 import Header from './components/Header'
@@ -113,6 +113,26 @@ export default function App() {
     }
   }
 
+  const handleStopSharing = async (hash: string) => {
+    try {
+      await stopSharing(hash)
+      await fetchAll()
+      showToast('Sharing paused', true)
+    } catch (err) {
+      showToast(String(err), false)
+    }
+  }
+
+  const handleResumeSharing = async (hash: string) => {
+    try {
+      await resumeSharing(hash)
+      await fetchAll()
+      showToast('Sharing resumed', true)
+    } catch (err) {
+      showToast(String(err), false)
+    }
+  }
+
   const connected = health?.status === 'ok'
   const visibleFiles = files.filter(f =>
     f.name.toLowerCase().includes(search.toLowerCase()) &&
@@ -154,6 +174,8 @@ export default function App() {
                   downloading={downloading}
                   onDownload={(hash, pw) => handleDownload(hash, pw)}
                   onDelete={handleDelete}
+                  onStopSharing={handleStopSharing}
+                  onResumeSharing={handleResumeSharing}
                   peerId={health?.peer_id ?? ''}
                 />
               </div>

@@ -7,6 +7,8 @@ interface FileTableProps {
   downloading: Set<string>
   onDownload: (hash: string, password?: string) => void
   onDelete: (hash: string) => void
+  onStopSharing: (hash: string) => void
+  onResumeSharing: (hash: string) => void
   peerId: string
 }
 
@@ -14,20 +16,27 @@ function StatusBadge({ file }: { file: NetworkFile }) {
   const status = getFileStatus(file)
   const base = 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium'
 
-  if (status === 'Downloaded') {
-    return <span className={`${base} bg-green-950 text-green-400 border border-green-900`}>Downloaded</span>
-  }
-  if (status === 'Partial') {
-    return (
-      <span className={`${base} bg-yellow-950 text-yellow-400 border border-yellow-900`}>
-        Partial {file.local_chunks}/{file.chunks.length}
-      </span>
-    )
-  }
-  if (status === 'Available') {
-    return <span className={`${base} bg-blue-950 text-accent border border-accent-dim`}>Available</span>
-  }
-  return <span className={`${base} bg-zinc-900 text-slate-500 border border-zinc-800`}>Unavailable</span>
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      {status === 'Downloaded' && (
+        <span className={`${base} bg-green-950 text-green-400 border border-green-900`}>Downloaded</span>
+      )}
+      {status === 'Partial' && (
+        <span className={`${base} bg-yellow-950 text-yellow-400 border border-yellow-900`}>
+          Partial {file.local_chunks}/{file.chunks.length}
+        </span>
+      )}
+      {status === 'Available' && (
+        <span className={`${base} bg-blue-950 text-accent border border-accent-dim`}>Available</span>
+      )}
+      {status === 'Unavailable' && (
+        <span className={`${base} bg-zinc-900 text-slate-500 border border-zinc-800`}>Unavailable</span>
+      )}
+      {file.sharing_paused && (
+        <span className={`${base} bg-yellow-950 text-yellow-400 border border-yellow-900`}>Paused</span>
+      )}
+    </div>
+  )
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -75,9 +84,10 @@ function ChunkMap({ file, peerId }: { file: NetworkFile; peerId: string }) {
   )
 }
 
-export default function FileTable({ files, downloading, onDownload, onDelete, peerId }: FileTableProps) {
+export default function FileTable({ files, downloading, onDownload, onDelete, onStopSharing, onResumeSharing, peerId }: FileTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [filePasswords, setFilePasswords] = useState<Record<string, string>>({})
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
 
   const toggleExpand = (hash: string) => {
     setExpanded(prev => {
@@ -114,7 +124,7 @@ export default function FileTable({ files, downloading, onDownload, onDelete, pe
             <th className="pb-3 pr-4 text-right font-medium">Action</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-border">
+        <tbody className="divide-y divide-border" onClick={() => setConfirmingDelete(null)}>
           {files.map((file) => {
             const status = getFileStatus(file)
             const isDownloading = downloading.has(file.file_hash)
@@ -124,6 +134,8 @@ export default function FileTable({ files, downloading, onDownload, onDelete, pe
             const progress = file.chunks.length > 0
               ? Math.round((file.local_chunks / file.chunks.length) * 100)
               : 0
+            const isConfirmingDelete = confirmingDelete === file.file_hash
+            const isSoleSource = peerCount <= 1
 
             return (
               <>
@@ -177,18 +189,62 @@ export default function FileTable({ files, downloading, onDownload, onDelete, pe
                   </td>
                   <td className="py-3 pr-4" onClick={e => e.stopPropagation()}>
                     <div className="flex items-center justify-end gap-2">
-                      {/* Delete button — only for files this peer has locally */}
+
+                      {/* Stop Sharing / Resume button — only for files this peer has locally */}
                       {file.local_chunks > 0 && (
-                        <button
-                          onClick={() => onDelete(file.file_hash)}
-                          title="Remove file"
-                          className="p-1.5 rounded text-slate-600 hover:text-red-400 hover:bg-red-900/20 transition-colors"
-                        >
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
+                        file.sharing_paused ? (
+                          <button
+                            onClick={() => onResumeSharing(file.file_hash)}
+                            title="Resume sharing"
+                            className="p-1.5 rounded text-slate-600 hover:text-green-400 hover:bg-green-900/20 transition-colors"
+                          >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => onStopSharing(file.file_hash)}
+                            title="Stop sharing"
+                            className="p-1.5 rounded text-slate-600 hover:text-yellow-400 hover:bg-yellow-900/20 transition-colors"
+                          >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </button>
+                        )
+                      )}
+
+                      {/* Delete button with two-click confirm + sole-source warning */}
+                      {file.local_chunks > 0 && (
+                        isConfirmingDelete ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onDelete(file.file_hash); setConfirmingDelete(null) }}
+                            title={isSoleSource ? 'Only source — file will be gone for everyone!' : 'Confirm delete'}
+                            className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                              isSoleSource
+                                ? 'text-red-300 bg-red-900/40 border border-red-700 animate-pulse'
+                                : 'text-red-400 bg-red-900/30 border border-red-800'
+                            }`}
+                          >
+                            {isSoleSource ? 'Only source!' : 'Confirm?'}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmingDelete(file.file_hash) }}
+                            title="Delete file"
+                            className="p-1.5 rounded text-slate-600 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                          >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        )
                       )}
 
                       {/* Download button / progress bar */}

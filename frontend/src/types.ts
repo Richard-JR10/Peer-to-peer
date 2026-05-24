@@ -28,6 +28,7 @@ export interface NetworkFile {
   local_chunks: number
   allowed_peers: string[]
   password_protected: boolean
+  sharing_paused: boolean
 }
 
 export interface Peer {
