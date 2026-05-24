@@ -16,16 +16,17 @@ REM ============================================================
 set PYTHONPATH=src
 set PEER_HOST=0.0.0.0
 
-echo [PDC] Starting peer.py (P2P backend)...
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
-start /B python -m peer > peer.log 2>&1
+
+echo [PDC] Starting peer.py in a new window...
+start "PDC peer.py" cmd /k python -m peer
 
 echo [PDC] Starting web frontend via Docker...
 docker compose up -d --build
 
 echo.
+echo  Peer window: watch peer.py logs there (close it to stop the peer)
 echo  Open http://localhost:8080 in your browser
-echo  Peer log: peer.log
-echo  To stop:  docker compose down  ^&  taskkill /F /IM python.exe
+echo  To stop: close the peer.py window  ^&  docker compose down
 echo.
 pause

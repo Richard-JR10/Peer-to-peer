@@ -87,38 +87,48 @@ The P2P layer (peer discovery, chunk transfer) runs natively on the host. Docker
 
 ## Quick Start
 
-### 1. Find your Wi-Fi IP
+### Option A — Dev Mode (no Docker needed)
+
+Open **two terminals** in the project root.
+
+**Terminal 1 — peer backend:**
 
 ```powershell
-ipconfig
-# Look for: Wireless LAN adapter Wi-Fi → IPv4 Address
-# Example: 192.168.1.105
+$env:PYTHONPATH = "src"
+$env:PEER_ID = "Richard"
+$env:PEER_ADVERTISE_HOST = "192.168.0.135"
+$env:PEER_PORT = "9000"
+$env:DATA_DIR = "data\peer1"
+python -m peer
 ```
 
-### 2. Edit `start.bat`
+Keep this window open — it shows peer logs and any errors in real time.
 
-Open `start.bat` and set your values at the top:
+**Terminal 2 — React dev server:**
 
-```batch
-set PEER_ID=peer1                     ← unique name for this laptop
-set PEER_ADVERTISE_HOST=192.168.1.105 ← your actual Wi-Fi IP
-set PEER_PORT=9000
-set DATA_DIR=data\peer1
+```powershell
+cd frontend
+npm run dev
 ```
 
-Every laptop in the demo needs a **different** `PEER_ID` and its **own** Wi-Fi IP.
+Open **http://localhost:5173** in your browser.
 
-### 3. Start Docker Desktop
+> Set `PEER_ID` to a unique name for your machine and `PEER_ADVERTISE_HOST` to your Wi-Fi IP.
+> Find it with: `ipconfig` → "Wireless LAN adapter Wi-Fi → IPv4 Address"
 
-Make sure Docker Desktop is running (whale icon in the system tray, "Engine running").
+---
 
-### 4. Run
+### Option B — Full Mode (Docker frontend)
 
-```batch
-start.bat
-```
+Requires Docker Desktop running (whale icon in system tray → "Engine running").
 
-This starts `peer.py` natively and brings up the Docker frontend. Open **http://localhost:8080** in your browser.
+1. Edit `start.bat` — set `PEER_ID` and `PEER_ADVERTISE_HOST` at the top.
+2. Double-click `start.bat` or run it in a terminal.
+
+`start.bat` opens a dedicated **peer window** showing live logs, then starts the Docker frontend.
+Open **http://localhost:8080** in your browser.
+
+To stop: close the peer window and run `docker compose down`.
 
 ---
 
@@ -142,32 +152,6 @@ Allow these on every laptop (Windows Security → Firewall → Allow an app):
 TCP 9000   peer HTTP API and chunk transfer
 UDP 9999   peer discovery broadcast
 ```
-
----
-
-## Dev Mode (No Docker)
-
-Useful for development. Open two terminals:
-
-**Terminal 1 — peer backend:**
-
-```powershell
-$env:PYTHONPATH = "src"
-$env:PEER_ID = "peer1"
-$env:PEER_ADVERTISE_HOST = "127.0.0.1"
-$env:PEER_PORT = "9000"
-$env:DATA_DIR = "data\peer1"
-python -m peer
-```
-
-**Terminal 2 — React dev server:**
-
-```powershell
-cd frontend
-npm run dev
-```
-
-Open **http://localhost:5173**. The Vite dev server proxies `/api/*` to `peer.py` on port 9000.
 
 ---
 
@@ -310,7 +294,7 @@ taskkill /F /IM python.exe
 ## Troubleshooting
 
 **502 Bad Gateway at localhost:8080**
-peer.py is not running. Check `peer.log` in the project folder. Wait a few seconds and refresh.
+peer.py is not running. Check the peer window opened by `start.bat` for error output. If using dev mode, make sure the `python -m peer` terminal is still running.
 
 **Docker won't start**
 Docker Desktop is not running. Open it from the Start menu and wait for "Engine running" in the system tray.
