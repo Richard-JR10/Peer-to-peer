@@ -165,11 +165,11 @@ def cleanup_inactive_peers():
 
 
 def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chunks):
-    if file_hash in DELETED_HASHES:
-        return file_hash
     normalized_chunks = normalize_chunks(chunks)
     owned = normalize_owned_chunks(owned_chunks)
     with CATALOG_LOCK:
+        if file_hash in DELETED_HASHES:
+            return file_hash
         existing = CATALOG.get(file_hash)
         if existing and not chunk_metadata_matches(existing["chunks"], normalized_chunks):
             raise ValueError(f"conflicting metadata for file {file_hash}")
@@ -847,12 +847,15 @@ class PeerHandler(BaseHTTPRequestHandler):
                     if file_hash not in CATALOG:
                         send_json(self, HTTPStatus.NOT_FOUND, {"error": "file not known"})
                         return
+                    file_name = CATALOG[file_hash].get("name", "")
                     CATALOG.pop(file_hash)
-                DELETED_HASHES.add(file_hash)
+                    DELETED_HASHES.add(file_hash)
                 chunk_dir = CHUNKS_DIR / file_hash
                 if chunk_dir.exists():
                     shutil.rmtree(chunk_dir)
                 manifest_path(file_hash).unlink(missing_ok=True)
+                if file_name:
+                    (SHARED_DIR / file_name).unlink(missing_ok=True)
                 send_json(self, HTTPStatus.OK, {"ok": True, "file_hash": file_hash})
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
