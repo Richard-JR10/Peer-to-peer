@@ -1,363 +1,337 @@
 # Trackerless Peer-to-Peer File Sharing
 
-This project is a Python prototype for decentralized file sharing on a local network. Each computer runs the same peer application. There is no central tracker server: peers discover each other, exchange metadata, and download file chunks directly from one another.
+A decentralized file sharing application for local networks. Each computer runs the same peer application — there is no central tracker or server. Peers discover each other automatically via UDP broadcast, exchange file metadata, and download chunks directly from one another.
 
-The current name and visual branding are temporary. They can be replaced later without changing the core peer-to-peer system.
+The web frontend is served through Docker. The peer backend runs natively so that UDP broadcast discovery continues to work across Wi-Fi.
+
+---
 
 ## Features
 
 - Trackerless peer-to-peer file sharing
-- LAN peer discovery using UDP broadcast
+- Automatic LAN peer discovery via UDP broadcast (no IP entry needed)
 - Optional bootstrap peers for VPNs or networks that block broadcast
-- File chunking and reconstruction
+- File chunking and parallel reconstruction
 - SHA-256 file and chunk verification
-- Parallel chunk downloads
-- Direct peer-to-peer chunk serving over HTTP/TCP
-- Downloaded files remain shareable and visible even when the original source goes offline
-- Tkinter desktop launcher with per-file availability status
+- Parallel chunk downloads (4 workers)
+- Downloaded files remain shareable even when the original source goes offline
+- React web dashboard served via Docker + Nginx
+- Drag-and-drop file publishing from the browser
+- Fine-grained mutex locking for thread-safe concurrent transfers
+
+---
 
 ## Requirements
 
-For native desktop usage:
+| Tool | Minimum version | Check |
+|---|---|---|
+| Python | 3.12 | `python --version` |
+| Node.js | 18 | `node --version` |
+| Docker Desktop | any | `docker --version` |
 
-- Python 3.12 or newer recommended
-- Windows, macOS, or Linux
-- No third-party Python packages required
+No third-party Python packages are required.
+
+---
 
 ## Project Structure
 
-```text
+```
 .
-|-- gui_launcher.py
-|-- README.md
-|-- data/
-|   `-- peer folders and runtime files
-`-- src/
-    |-- chunking.py
-    |-- http_utils.py
-    `-- peer.py
+├── start.bat               ← Windows launch script (edit this first)
+├── start.sh                ← Unix launch script
+├── Dockerfile              ← 2-stage build: Node → Nginx
+├── docker-compose.yml
+├── docker/
+│   └── nginx.conf          ← proxies /api/* to native peer.py
+├── frontend/               ← React + TypeScript + Tailwind source
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── api.ts
+│   │   ├── types.ts
+│   │   ├── hooks/
+│   │   │   └── usePolling.ts
+│   │   └── components/
+│   │       ├── Header.tsx
+│   │       ├── FileTable.tsx
+│   │       ├── UploadZone.tsx
+│   │       ├── PeersPanel.tsx
+│   │       └── LocalPanel.tsx
+│   ├── package.json
+│   └── vite.config.ts
+├── src/
+│   ├── peer.py             ← peer server, discovery, chunk transfer
+│   ├── chunking.py         ← file splitting and reconstruction
+│   └── http_utils.py       ← JSON HTTP helpers
+├── gui_launcher.py         ← legacy Tkinter desktop launcher
+└── data/                   ← runtime peer data (gitignored)
 ```
 
-Important files:
+---
 
-- `src/peer.py`: peer server, discovery, metadata sync, publish/download endpoints
-- `src/chunking.py`: file splitting, hashing, and reconstruction
-- `src/http_utils.py`: shared JSON HTTP helpers
-- `gui_launcher.py`: desktop GUI launcher
+## Architecture
+
+```
+HOST MACHINE (native Python):
+  peer.py  →  TCP 9000   HTTP API + chunk transfer
+           →  UDP 9999   peer discovery broadcast  ← must stay native
+
+DOCKER CONTAINER:
+  Nginx    →  port 8080
+    /api/* →  proxy to host.docker.internal:9000
+    /*     →  serve React web UI
+```
+
+The P2P layer (peer discovery, chunk transfer) runs natively on the host. Docker only packages the web frontend. This design keeps UDP broadcast working on real Wi-Fi networks.
+
+---
+
+## Quick Start
+
+### 1. Find your Wi-Fi IP
+
+```powershell
+ipconfig
+# Look for: Wireless LAN adapter Wi-Fi → IPv4 Address
+# Example: 192.168.1.105
+```
+
+### 2. Edit `start.bat`
+
+Open `start.bat` and set your values at the top:
+
+```batch
+set PEER_ID=peer1                     ← unique name for this laptop
+set PEER_ADVERTISE_HOST=192.168.1.105 ← your actual Wi-Fi IP
+set PEER_PORT=9000
+set DATA_DIR=data\peer1
+```
+
+Every laptop in the demo needs a **different** `PEER_ID` and its **own** Wi-Fi IP.
+
+### 3. Start Docker Desktop
+
+Make sure Docker Desktop is running (whale icon in the system tray, "Engine running").
+
+### 4. Run
+
+```batch
+start.bat
+```
+
+This starts `peer.py` natively and brings up the Docker frontend. Open **http://localhost:8080** in your browser.
+
+---
+
+## Multi-Laptop Demo (Same Wi-Fi)
+
+On each laptop, edit `start.bat` with that laptop's own values, then run it:
+
+| | Laptop A | Laptop B | Laptop C |
+|---|---|---|---|
+| `PEER_ID` | `peer-alice` | `peer-bob` | `peer-charlie` |
+| `PEER_ADVERTISE_HOST` | `192.168.1.101` | `192.168.1.102` | `192.168.1.103` |
+| `DATA_DIR` | `data\alice` | `data\bob` | `data\charlie` |
+
+Open **http://localhost:8080** on each laptop. Peers discover each other automatically within 5 seconds — no manual IP entry required.
+
+### Firewall
+
+Allow these on every laptop (Windows Security → Firewall → Allow an app):
+
+```
+TCP 9000   peer HTTP API and chunk transfer
+UDP 9999   peer discovery broadcast
+```
+
+---
+
+## Dev Mode (No Docker)
+
+Useful for development. Open two terminals:
+
+**Terminal 1 — peer backend:**
+
+```powershell
+$env:PYTHONPATH = "src"
+$env:PEER_ID = "peer1"
+$env:PEER_ADVERTISE_HOST = "127.0.0.1"
+$env:PEER_PORT = "9000"
+$env:DATA_DIR = "data\peer1"
+python -m peer
+```
+
+**Terminal 2 — React dev server:**
+
+```powershell
+cd frontend
+npm run dev
+```
+
+Open **http://localhost:5173**. The Vite dev server proxies `/api/*` to `peer.py` on port 9000.
+
+---
+
+## Same-Computer Testing (Multiple Peers)
+
+Run multiple peer processes on one machine. Each needs a unique peer ID, unique peer port, and separate data folder.
+
+**Terminal 1:**
+```powershell
+$env:PYTHONPATH = "src"; $env:PEER_ID = "peer1"
+$env:PEER_ADVERTISE_HOST = "127.0.0.1"; $env:PEER_PORT = "9000"
+$env:DATA_DIR = "data\peer1"; python -m peer
+```
+
+**Terminal 2:**
+```powershell
+$env:PYTHONPATH = "src"; $env:PEER_ID = "peer2"
+$env:PEER_ADVERTISE_HOST = "127.0.0.1"; $env:PEER_PORT = "9001"
+$env:DATA_DIR = "data\peer2"; python -m peer
+```
+
+Peers advertising `127.0.0.1` automatically probe local ports `9000–9010`, so bootstrap peers can stay blank.
+
+---
+
+## Different Wi-Fi (VPN)
+
+UDP broadcast does not cross different networks. Use [Tailscale](https://tailscale.com) to create a shared LAN.
+
+1. Install Tailscale on each computer and sign in to the same network.
+2. Use each computer's Tailscale IP as `PEER_ADVERTISE_HOST`.
+3. Set `BOOTSTRAP_PEERS` to the other computer's Tailscale address.
+
+```batch
+Computer 1:  PEER_ADVERTISE_HOST=100.80.12.34   BOOTSTRAP_PEERS=100.90.55.10:9000
+Computer 2:  PEER_ADVERTISE_HOST=100.90.55.10   BOOTSTRAP_PEERS=100.80.12.34:9000
+```
+
+---
 
 ## How It Works
 
-Each peer runs an HTTP server for local control and peer-to-peer transfer. HTTP uses TCP. Peers also send UDP discovery messages on the discovery port.
+### Peer Discovery
 
-Default ports:
+Every peer broadcasts a `peer_hello` UDP packet every 5 seconds on port 9999. Any peer on the same LAN that receives it adds the sender to its peer registry. Inactive peers are removed after 45 seconds.
 
-- Peer HTTP/TCP: `9000`
-- UDP discovery: `9999`
+### Publishing a File
 
-Peer discovery works in two ways:
-
-- **UDP broadcast:** peers on the same LAN can automatically find each other.
-- **Bootstrap peers:** a peer can be given one or more `host:port` addresses to contact at startup.
-
-In short:
-
-```text
-UDP 9999 = peer discovery
-TCP 9000 = metadata, control API, and file chunk transfer
-```
-
-When a peer starts, it automatically publishes files that already exist directly inside its `shared/` folder.
-Manual publishing is only needed for files added after the peer is already running.
-
-When a file is published:
-
-1. The file is split into chunks.
+1. The file is split into 512 KB chunks.
 2. Each chunk receives a SHA-256 hash.
-3. The full file receives a SHA-256 hash.
-4. The local peer records that it owns the chunks.
-5. Other peers learn about the file through `/manifest` metadata exchange.
+3. The full file receives a SHA-256 hash (used as its permanent network identity).
+4. The peer records its chunk ownership in the local catalog.
+5. Other peers learn about the file through `/manifest` metadata exchange every 8 seconds.
 
-When a file is downloaded:
+### Downloading a File
 
-1. The downloader checks its local metadata catalog.
-2. It finds peers that own the needed chunks.
-3. It requests chunks directly with `/chunk`.
-4. It verifies each chunk hash.
-5. It reconstructs the final file.
-6. It becomes a source for the chunks it now owns.
+1. The peer looks up which peers own each chunk.
+2. Up to 4 chunks are fetched in parallel from different peers.
+3. Each chunk is verified against its SHA-256 hash.
+4. The file is reconstructed and the peer becomes a new source for those chunks.
 
-Downloaded files stay shareable even if the original source peer goes offline. Each peer saves file manifests locally and, on restart, re-advertises any verified chunks still present in its `chunks/` folder.
-
-The Network Files list shows a **Status** for every known file:
+### File Status
 
 | Status | Meaning |
-|--------|---------|
-| Downloaded | All chunks are stored locally; file is available without any peers |
-| Partial | Some chunks are stored locally; remaining chunks need peers |
-| Available | No local chunks; at least one peer is online with the file |
-| Unavailable | No local chunks and no reachable peers; metadata only |
+|---|---|
+| **Downloaded** | All chunks stored locally; no peers needed |
+| **Partial** | Some chunks local; remaining chunks need peers |
+| **Available** | No local chunks; at least one peer online with the file |
+| **Unavailable** | No local chunks and no reachable peers |
 
-## Native GUI Setup
+### Concurrency and Mutex Design
 
-Start the desktop launcher from the project folder:
+The peer server is multi-threaded. Two separate locks protect shared state:
 
-```powershell
-python -m gui_launcher
+- `PEERS_LOCK` — guards the peer registry
+- `CATALOG_LOCK` — guards the file catalog and chunk ownership records
+
+Locks are always acquired in the order `PEERS_LOCK → CATALOG_LOCK` to prevent deadlock. A per-file download lock (`_file_dl_locks`) prevents concurrent downloads of the same file from racing on chunk writes and file assembly.
+
+---
+
+## HTTP API
+
+Each peer exposes these endpoints on its peer port (default 9000):
+
+```
+GET  /health                              service status
+GET  /peers                               known peer list
+GET  /files                               full network file catalog
+GET  /manifest                            export manifest for peer sync
+GET  /local                               local shared/downloaded files
+GET  /chunk?file_hash=<hash>&index=<n>    download one chunk
+POST /publish   {"path": "/abs/path"}     publish a local file by path
+POST /upload?name=<filename>  <raw body>  publish a file uploaded from browser
+POST /download  {"file_hash": "..."}      download a file from peers
+POST /manifest  <manifest object>         receive manifest from peer
 ```
 
-If Python cannot find the module, run it as a script instead:
+**Publish by path (CLI):**
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:9000/publish" `
+  -ContentType "application/json" `
+  -Body '{"path":"C:\\Users\\you\\Documents\\file.pdf"}'
+```
+
+**Upload from browser (curl):**
+```powershell
+curl.exe -X POST "http://127.0.0.1:9000/upload?name=file.pdf" `
+  --data-binary @file.pdf
+```
+
+**Download a file:**
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:9000/download" `
+  -ContentType "application/json" `
+  -Body '{"file_hash":"PASTE_HASH_HERE"}'
+```
+
+---
+
+## Legacy Desktop Launcher
+
+The original Tkinter GUI is still available:
 
 ```powershell
 python gui_launcher.py
 ```
 
-Fill in the peer settings:
+---
 
-```text
-Peer ID: peer1
-This laptop IP: 127.0.0.1 or your LAN/Tailscale IP
-Peer port: 9000
-Discovery port: 9999
-Bootstrap peers: optional
-Data folder: data/gui-peer
-```
-
-Click **Start service**.
-
-Use the GUI to:
-
-- publish files
-- refresh known network files
-- download selected files
-- view local shared/downloaded files with chunk counts
-- view discovered peers
-- see per-file availability status (Downloaded / Partial / Available / Unavailable)
-
-Files already in the selected data folder's `shared/` directory are published automatically when the service starts. Empty files (0 bytes) cannot be published.
-
-## Same-Computer Testing
-
-You can run multiple GUI windows on one computer. Each peer needs a unique peer ID, unique peer port, and separate data folder.
-
-Example:
-
-```text
-Peer 1
-Peer ID: peer1
-This laptop IP: 127.0.0.1
-Peer port: 9000
-Discovery port: 9999
-Bootstrap peers: blank
-Data folder: data/gui-peer1
-
-Peer 2
-Peer ID: peer2
-This laptop IP: 127.0.0.1
-Peer port: 9001
-Discovery port: 9999
-Bootstrap peers: blank
-Data folder: data/gui-peer2
-```
-
-For local testing, peers advertising `127.0.0.1` automatically probe local ports `9000-9010`, so `Bootstrap peers` can usually stay blank.
-These local probes are internal discovery candidates; only real peers that answer with a manifest are shown in the peer list.
-
-## Same-Wi-Fi Testing
-
-On each computer:
-
-1. Copy or clone this project.
-2. Open the project folder.
-3. Run:
+## Stopping Everything
 
 ```powershell
-python -m gui_launcher
+docker compose down
+taskkill /F /IM python.exe
 ```
 
-Find each computer's Wi-Fi IPv4 address:
-
-```powershell
-ipconfig
-```
-
-Use the Wi-Fi IPv4 address in **This laptop IP**.
-
-Example:
-
-```text
-Computer 1
-Peer ID: peer1
-This laptop IP: 192.168.1.25
-Peer port: 9000
-Discovery port: 9999
-Bootstrap peers: blank
-
-Computer 2
-Peer ID: peer2
-This laptop IP: 192.168.1.40
-Peer port: 9000
-Discovery port: 9999
-Bootstrap peers: blank
-```
-
-If automatic discovery does not work, use bootstrap peers:
-
-```text
-Computer 1 Bootstrap peers: 192.168.1.40:9000
-Computer 2 Bootstrap peers: 192.168.1.25:9000
-```
-
-Allow firewall access on every computer:
-
-```text
-TCP 9000
-UDP 9999
-```
-
-## Different-Wi-Fi Testing
-
-UDP broadcast usually does not cross different Wi-Fi networks. Use a VPN-style LAN such as Tailscale.
-
-1. Install Tailscale on each computer.
-2. Sign in to the same Tailscale network.
-3. Use each computer's Tailscale IP in **This laptop IP**.
-4. Put the other computer's Tailscale address in **Bootstrap peers**.
-
-Example:
-
-```text
-Computer 1
-This laptop IP: 100.80.12.34
-Bootstrap peers: 100.90.55.10:9000
-
-Computer 2
-This laptop IP: 100.90.55.10
-Bootstrap peers: 100.80.12.34:9000
-```
-
-## Native HTTP API
-
-Each peer exposes these endpoints:
-
-```text
-GET  /health
-GET  /peers
-GET  /files
-GET  /manifest
-GET  /local
-GET  /chunk?file_hash=<hash>&index=<chunk_index>
-POST /publish
-POST /download
-POST /manifest
-```
-
-`GET /files` returns a list of all known files. Each entry includes a `local_chunks` field with the count of chunks owned locally by this peer, which can be compared against `chunks` to determine local availability.
-
-Publish a local file:
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:9000/publish" `
-  -ContentType "application/json" `
-  -Body '{"path":"C:\\path\\to\\file.pdf"}'
-```
-
-Use this endpoint for files added while the peer is already running. Files already in `shared/` are published at startup.
-
-Download a known file:
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:9000/download" `
-  -ContentType "application/json" `
-  -Body '{"file_hash":"PASTE_FILE_HASH_HERE"}'
-```
-
-## Native Command-Line Testing
-
-The GUI is the easiest way to run peers, but you can also start peer processes directly.
-
-Start peer 1:
-
-```powershell
-$env:PYTHONPATH="src"
-$env:PEER_ID="peer1"
-$env:PEER_ADVERTISE_HOST="127.0.0.1"
-$env:PEER_PORT="9000"
-$env:DATA_DIR="data/peer1"
-python -m peer
-```
-
-Start peer 2 in a second terminal:
-
-```powershell
-$env:PYTHONPATH="src"
-$env:PEER_ID="peer2"
-$env:PEER_ADVERTISE_HOST="127.0.0.1"
-$env:PEER_PORT="9001"
-$env:DATA_DIR="data/peer2"
-python -m peer
-```
-
-Use `curl.exe` in PowerShell so Windows does not use the `curl` alias for `Invoke-WebRequest`.
-
-List files known by peer 1:
-
-```powershell
-curl.exe http://localhost:9000/files
-```
-
-List files known by peer 2 after manifest sync:
-
-```powershell
-curl.exe http://localhost:9001/files
-```
-
-Copy the returned `file_hash`, then download from peer 2:
-
-```powershell
-curl.exe -X POST http://localhost:9001/download -H "Content-Type: application/json" -d "{\"file_hash\":\"PASTE_FILE_HASH_HERE\"}"
-```
+---
 
 ## Troubleshooting
 
-### Both GUI windows show the same peer
+**502 Bad Gateway at localhost:8080**
+peer.py is not running. Check `peer.log` in the project folder. Wait a few seconds and refresh.
 
-Both windows are probably using the same peer port. Use different ports:
+**Docker won't start**
+Docker Desktop is not running. Open it from the Start menu and wait for "Engine running" in the system tray.
 
-```text
-peer1: 9000
-peer2: 9001
-peer3: 9002
-```
+**Peers don't discover each other**
+- All laptops must be on the same Wi-Fi network.
+- `PEER_ADVERTISE_HOST` must be set to the actual Wi-Fi IP, not `127.0.0.1`.
+- Windows Firewall must allow Python on TCP 9000 and UDP 9999.
 
-### Peers do not discover each other
+**Peers discover each other but downloads fail**
+- The peer advertised the wrong IP. Run `ipconfig` and confirm the IPv4 matches `PEER_ADVERTISE_HOST`.
 
-Check:
+**PowerShell curl error**
+Use `curl.exe` instead of `curl`. PowerShell's `curl` is an alias for `Invoke-WebRequest`.
 
-- each peer has a unique peer ID
-- each peer advertises the correct LAN/Tailscale IP
-- TCP peer port is allowed by firewall
-- UDP discovery port is allowed by firewall
-- bootstrap peers are written as `host:port`
+**Cannot publish an empty file**
+The publish and upload endpoints reject files with 0 bytes.
 
-### Timeout to the wrong IP
+---
 
-If logs show a timeout to an unexpected IP, the peer probably advertised the wrong network adapter. Set **This laptop IP** to the reachable Wi-Fi or Tailscale IP.
-
-### PowerShell curl error
-
-Use `curl.exe`, not `curl`, or use `Invoke-RestMethod`.
-
-### Cannot publish a file
-
-The publish endpoint rejects empty files (0 bytes). Check that the file has content before publishing.
-
-If publishing fails with a path error, make sure the path uses the correct separator for your OS and that the file exists at that exact path.
-
-## Development Checks
+## Development
 
 Compile all Python files:
 
@@ -365,12 +339,21 @@ Compile all Python files:
 python -m compileall gui_launcher.py src
 ```
 
-## Cleanup
+Build the React frontend:
 
-Remove generated Python caches if needed:
+```powershell
+cd frontend
+npm run build
+```
+
+Build and run the Docker image locally:
+
+```powershell
+docker compose up --build
+```
+
+Clean Python caches:
 
 ```powershell
 Remove-Item -Recurse -Force __pycache__, src\__pycache__
 ```
-
-Runtime file data is stored under `data/`. Delete only the peer data folders you no longer need.
