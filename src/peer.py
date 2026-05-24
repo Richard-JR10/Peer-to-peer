@@ -191,6 +191,10 @@ def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chun
         )
         file_info["name"] = file_info.get("name") or name
         file_info["size"] = int(file_info.get("size") or size)
+        if password_protected:
+            file_info["password_protected"] = True
+        if allowed_peers:
+            file_info["allowed_peers"] = list(allowed_peers)
         if owned:
             file_info["peers"][owner_peer_id] = {
                 "peer_id": owner_peer_id,
@@ -318,6 +322,8 @@ def merge_manifest(manifest, source_peer=None):
                     file_info["chunks"],
                     peer_id,
                     owner.get("chunks", []),
+                    allowed_peers=file_info.get("allowed_peers", []),
+                    password_protected=file_info.get("password_protected", False),
                 )
             except ValueError as exc:
                 print(f"[{PEER_ID}] rejected metadata from {source_peer or 'peer'}: {exc}", flush=True)
