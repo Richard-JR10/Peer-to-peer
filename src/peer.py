@@ -107,6 +107,8 @@ def persist_file_manifest(file_info):
         "size": int(file_info["size"]),
         "chunk_size": int(file_info.get("chunk_size", CHUNK_SIZE)),
         "chunks": normalize_chunks(file_info["chunks"]),
+        "allowed_peers": list(file_info.get("allowed_peers", [])),
+        "password_protected": bool(file_info.get("password_protected", False)),
     }
     target = manifest_path(file_info["file_hash"])
     temp_target = target.with_suffix(".tmp")
@@ -164,7 +166,8 @@ def cleanup_inactive_peers():
                     file_info.get("peers", {}).pop(pid, None)
 
 
-def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chunks):
+def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chunks,
+                         allowed_peers=None, password_protected=False):
     normalized_chunks = normalize_chunks(chunks)
     owned = normalize_owned_chunks(owned_chunks)
     with CATALOG_LOCK:
@@ -182,6 +185,8 @@ def add_file_to_catalog(file_hash, name, size, chunks, owner_peer_id, owned_chun
                 "chunk_size": CHUNK_SIZE,
                 "chunks": normalized_chunks,
                 "peers": {},
+                "allowed_peers": list(allowed_peers or []),
+                "password_protected": bool(password_protected),
             },
         )
         file_info["name"] = file_info.get("name") or name
@@ -247,6 +252,8 @@ def catalog_files_snapshot():
                     "chunks": normalize_chunks(file_info["chunks"]),
                     "peers": peers,
                     "local_chunks": local_chunks,
+                    "allowed_peers": list(file_info.get("allowed_peers", [])),
+                    "password_protected": bool(file_info.get("password_protected", False)),
                 }
             )
     return sorted(files, key=lambda item: (item["name"], item["file_hash"]))
@@ -433,7 +440,7 @@ def peer_url(peer, path):
 
 
 def peer_chunk_url(peer, file_hash, chunk):
-    return peer_url(peer, f"/chunk?file_hash={file_hash}&index={chunk['index']}")
+    return peer_url(peer, f"/chunk?file_hash={file_hash}&index={chunk['index']}&peer_id={PEER_ID}")
 
 
 def fetch_chunk(peer, file_hash, chunk):
@@ -494,7 +501,7 @@ def fetch_chunk_from_candidates(candidates, file_hash, chunk):
     raise RuntimeError(f"chunk {chunk['index']} failed from all reachable peers: {short_errors}")
 
 
-def publish_file(path):
+def publish_file(path, allowed_peers=None, password_protected=False):
     ensure_dirs()
     source = Path(path)
     if not source.exists():
@@ -526,6 +533,8 @@ def publish_file(path):
         chunks,
         PEER_ID,
         [chunk["index"] for chunk in chunks],
+        allowed_peers=allowed_peers,
+        password_protected=password_protected,
     )
     return {
         "file_hash": file_hash,
@@ -569,6 +578,8 @@ def restore_local_manifests():
                 chunks,
                 PEER_ID,
                 owned,
+                allowed_peers=manifest.get("allowed_peers", []),
+                password_protected=manifest.get("password_protected", False),
             )
             restored.append({"name": manifest["name"], "chunks": len(owned)})
         except Exception as exc:
@@ -590,7 +601,7 @@ def _get_file_download_lock(file_hash):
         return _file_dl_locks[file_hash]
 
 
-def download_file(file_hash):
+def download_file(file_hash, file_password=""):
     ensure_dirs()
     cleanup_inactive_peers()
     with CATALOG_LOCK:
@@ -630,6 +641,19 @@ def download_file(file_hash):
 
         safe_name = Path(file_info["name"]).name
         output = assemble_file(CHUNKS_DIR / file_hash, DOWNLOADS_DIR / safe_name, file_hash)
+
+        if file_info.get("password_protected"):
+            if not file_password:
+                output.unlink(missing_ok=True)
+                raise ValueError("this file is password protected — provide a password to download")
+            file_key = derive_key(file_password)
+            try:
+                decrypted = decrypt(output.read_bytes(), file_key)
+            except Exception:
+                output.unlink(missing_ok=True)
+                raise ValueError("wrong password")
+            output.write_bytes(decrypted)
+
         return {"file_hash": file_hash, "saved_to": str(output), "chunks": sorted(downloaded)}
 
 
@@ -767,6 +791,13 @@ class PeerHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             file_hash = query.get("file_hash", [None])[0]
             index = query.get("index", [None])[0]
+            requesting_peer_id = query.get("peer_id", [""])[0]
+            with CATALOG_LOCK:
+                _fi = CATALOG.get(file_hash)
+                _allowed = list(_fi.get("allowed_peers", [])) if _fi else []
+            if _allowed and requesting_peer_id not in _allowed:
+                send_json(self, HTTPStatus.FORBIDDEN, {"error": "access denied"})
+                return
             try:
                 path = chunk_path(file_hash, int(index)) if file_hash and index is not None else None
             except (ValueError, TypeError):
@@ -800,7 +831,7 @@ class PeerHandler(BaseHTTPRequestHandler):
         if parsed.path == "/download":
             try:
                 payload = read_json(self)
-                result = download_file(payload["file_hash"])
+                result = download_file(payload["file_hash"], file_password=payload.get("file_password", ""))
                 send_json(self, HTTPStatus.OK, result)
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -821,17 +852,24 @@ class PeerHandler(BaseHTTPRequestHandler):
                 if not safe_name:
                     send_json(self, HTTPStatus.BAD_REQUEST, {"error": "?name= query param required"})
                     return
+                allowed_peers_raw = query.get("allowed_peers", [""])[0].strip()
+                allowed_peers = [p.strip() for p in allowed_peers_raw.split(",") if p.strip()]
+                file_password = query.get("file_password", [""])[0].strip()
                 length = int(self.headers.get("Content-Length", "0"))
                 if length == 0:
                     send_json(self, HTTPStatus.BAD_REQUEST, {"error": "empty upload"})
                     return
                 data = self.rfile.read(length)
+                if file_password:
+                    file_key = derive_key(file_password)
+                    data = encrypt(data, file_key)
                 ensure_dirs()
                 tmp_path = SHARED_DIR / (safe_name + ".upload.tmp")
                 target_path = SHARED_DIR / safe_name
                 tmp_path.write_bytes(data)
                 tmp_path.replace(target_path)
-                result = publish_file(target_path)
+                result = publish_file(target_path, allowed_peers=allowed_peers,
+                                      password_protected=bool(file_password))
                 send_json(self, HTTPStatus.OK, result)
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})

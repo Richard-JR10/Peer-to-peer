@@ -69,10 +69,10 @@ export default function App() {
     setFastPoll(downloading.size > 0)
   }, [downloading])
 
-  const handleDownload = async (hash: string) => {
+  const handleDownload = async (hash: string, password?: string) => {
     setDownloading((prev) => new Set([...prev, hash]))
     try {
-      const result = await postDownload(hash)
+      const result = await postDownload(hash, password)
       showToast(`Saved to ${result.saved_to.split(/[\\/]/).pop()}`, true)
       await fetchAll()
     } catch (err) {
@@ -86,8 +86,8 @@ export default function App() {
     }
   }
 
-  const handleUpload = async (file: File, onProgress?: (pct: number) => void) => {
-    await postUpload(file, onProgress)
+  const handleUpload = async (file: File, onProgress?: (pct: number) => void, allowedPeers?: string[], filePassword?: string) => {
+    await postUpload(file, onProgress, allowedPeers, filePassword)
     await fetchAll()
   }
 
@@ -152,7 +152,7 @@ export default function App() {
                 <FileTable
                   files={visibleFiles}
                   downloading={downloading}
-                  onDownload={handleDownload}
+                  onDownload={(hash, pw) => handleDownload(hash, pw)}
                   onDelete={handleDelete}
                   peerId={health?.peer_id ?? ''}
                 />
@@ -160,7 +160,7 @@ export default function App() {
             </div>
 
             {/* Upload zone */}
-            <UploadZone onUpload={handleUpload} />
+            <UploadZone peers={peers} onUpload={handleUpload} />
           </div>
 
           {/* Right column */}

@@ -5,7 +5,7 @@ import { getFileStatus, formatBytes, truncateHash } from '../types'
 interface FileTableProps {
   files: NetworkFile[]
   downloading: Set<string>
-  onDownload: (hash: string) => void
+  onDownload: (hash: string, password?: string) => void
   onDelete: (hash: string) => void
   peerId: string
 }
@@ -77,6 +77,7 @@ function ChunkMap({ file, peerId }: { file: NetworkFile; peerId: string }) {
 
 export default function FileTable({ files, downloading, onDownload, onDelete, peerId }: FileTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [filePasswords, setFilePasswords] = useState<Record<string, string>>({})
 
   const toggleExpand = (hash: string) => {
     setExpanded(prev => {
@@ -135,9 +136,25 @@ export default function FileTable({ files, downloading, onDownload, onDelete, pe
                     <StatusBadge file={file} />
                   </td>
                   <td className="py-3 max-w-[200px]">
-                    <span className="truncate block text-white font-medium" title={file.name}>
-                      {file.name}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="truncate text-white font-medium" title={file.name}>
+                        {file.name}
+                      </span>
+                      {file.password_protected && (
+                        <span title="Password protected">
+                          <svg className="h-3 w-3 shrink-0 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                          </svg>
+                        </span>
+                      )}
+                      {file.allowed_peers.length > 0 && (
+                        <span title={`Restricted to: ${file.allowed_peers.join(', ')}`}>
+                          <svg className="h-3 w-3 shrink-0 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+                          </svg>
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="py-3 text-right text-slate-400 tabular-nums">
                     {formatBytes(file.size)}
@@ -191,21 +208,36 @@ export default function FileTable({ files, downloading, onDownload, onDelete, pe
                       ) : status === 'Downloaded' ? (
                         <span className="text-xs text-slate-600">—</span>
                       ) : (
-                        <button
-                          onClick={() => onDownload(file.file_hash)}
-                          disabled={!canDownload}
-                          className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                            canDownload
-                              ? 'bg-accent hover:bg-accent-hover text-white'
-                              : 'bg-zinc-800 text-slate-600 cursor-not-allowed'
-                          }`}
-                        >
-                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                          </svg>
-                          {status === 'Unavailable' ? 'No peers' : 'Download'}
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          {file.password_protected && (
+                            <input
+                              type="password"
+                              placeholder="Password…"
+                              value={filePasswords[file.file_hash] ?? ''}
+                              onChange={e => setFilePasswords(p => ({ ...p, [file.file_hash]: e.target.value }))}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && canDownload && filePasswords[file.file_hash]?.trim())
+                                  onDownload(file.file_hash, filePasswords[file.file_hash])
+                              }}
+                              className="w-24 rounded bg-surface border border-border px-2 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-accent"
+                            />
+                          )}
+                          <button
+                            onClick={() => onDownload(file.file_hash, filePasswords[file.file_hash])}
+                            disabled={!canDownload || (file.password_protected && !filePasswords[file.file_hash]?.trim())}
+                            className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                              canDownload && (!file.password_protected || filePasswords[file.file_hash]?.trim())
+                                ? 'bg-accent hover:bg-accent-hover text-white'
+                                : 'bg-zinc-800 text-slate-600 cursor-not-allowed'
+                            }`}
+                          >
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                            {status === 'Unavailable' ? 'No peers' : 'Download'}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </td>

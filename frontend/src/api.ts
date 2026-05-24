@@ -31,11 +31,11 @@ export const getPeers = (): Promise<{ peers: Peer[] }> =>
 export const getLocal = (): Promise<LocalFiles> =>
   apiFetch('/local')
 
-export const postDownload = (file_hash: string): Promise<DownloadResult> =>
+export const postDownload = (file_hash: string, file_password?: string): Promise<DownloadResult> =>
   apiFetch('/download', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_hash }),
+    body: JSON.stringify({ file_hash, ...(file_password ? { file_password } : {}) }),
   })
 
 export const deleteFile = (file_hash: string): Promise<{ ok: boolean }> =>
@@ -57,11 +57,16 @@ export const sendMessage = (to_peer_id: string, text: string): Promise<{ ok: boo
 
 export function postUpload(
   file: File,
-  onProgress?: (pct: number) => void
+  onProgress?: (pct: number) => void,
+  allowedPeers?: string[],
+  filePassword?: string
 ): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
+    const params = new URLSearchParams({ name: file.name })
+    if (allowedPeers?.length) params.set('allowed_peers', allowedPeers.join(','))
+    if (filePassword) params.set('file_password', filePassword)
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${BASE}/upload?name=${encodeURIComponent(file.name)}`)
+    xhr.open('POST', `${BASE}/upload?${params.toString()}`)
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
     if (onProgress) {
       xhr.upload.onprogress = (e) => {

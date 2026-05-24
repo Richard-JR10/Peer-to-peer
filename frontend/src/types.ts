@@ -26,6 +26,8 @@ export interface NetworkFile {
   chunks: ChunkMeta[]
   peers: Record<string, PeerOwnership>
   local_chunks: number
+  allowed_peers: string[]
+  password_protected: boolean
 }
 
 export interface Peer {

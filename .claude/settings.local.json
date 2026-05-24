@@ -17,7 +17,8 @@
       "Bash(curl -s \"https://raw.githubusercontent.com/Thalanas110/new-pdc-2/master/docker/entrypoint.sh\")",
       "Read(//c/Users/richa/.claude/plans/**)",
       "Bash(pip install *)",
-      "Bash(python -c \"from src.crypto import derive_key, encrypt, decrypt; key = derive_key\\('test'\\); ct = encrypt\\(b'hello world', key\\); print\\('decrypt:', decrypt\\(ct, key\\)\\)\")"
+      "Bash(python -c \"from src.crypto import derive_key, encrypt, decrypt; key = derive_key\\('test'\\); ct = encrypt\\(b'hello world', key\\); print\\('decrypt:', decrypt\\(ct, key\\)\\)\")",
+      "Bash(npm run *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\richa\\.claude\\plans"
