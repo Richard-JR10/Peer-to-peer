@@ -238,85 +238,290 @@ After the first manifest sync, peer lists propagate automatically — Computer 3
 
 ---
 
-## How It Works
+## How It Works — Technical Deep Dive
 
-### Peer Discovery
+This section explains every major subsystem and the Parallel and Distributed Computing (PDC) concepts each one demonstrates.
 
-Every 5 seconds each peer broadcasts a `peer_hello` UDP packet on port 9999. Any peer on the same network that receives it registers the sender. Peers that haven't been heard from in 45 seconds are removed from the registry and from chunk ownership records.
+---
 
-### Publishing a File
+### 1. Peer Discovery — Broadcast Communication
 
-1. The file is split into **512 KB chunks** (`chunking.py`).
-2. Each chunk gets a **SHA-256 hash** as its identity.
-3. The full assembled file also gets a SHA-256 hash — this is the permanent file ID.
-4. The peer writes chunk files to `data/chunks/<file_hash>/` and saves a JSON manifest to `data/manifests/`.
-5. The file is registered in the in-memory catalog with the peer's chunk ownership.
-6. Other peers learn about it via `/manifest` exchange every 8 seconds.
+**PDC concept: message passing in a distributed system, connectionless communication**
 
-### Downloading a File
+Every peer runs two background threads dedicated to discovery:
 
-1. The peer's catalog shows which peers own which chunks.
-2. Up to 4 chunks are fetched in parallel from different peers.
-3. Each received chunk is **AES-256-GCM decrypted** (transit key) then **SHA-256 verified**.
-4. Verified chunks are saved locally — this peer now becomes a source for those chunks.
-5. Once all chunks are present, `assemble_file()` reconstructs the file and verifies the full-file hash.
-6. If the file is password-protected, the assembled blob is **AES-256-GCM decrypted** with the per-file key before saving to `data/downloads/`.
+- **Broadcast thread** — every 5 seconds, serializes a `peer_hello` JSON payload and sends it as a UDP datagram to `255.255.255.255:9999` (the limited broadcast address). A directed subnet broadcast (e.g. `192.168.1.255`) is also sent so hotspots that filter `255.255.255.255` still forward the packet.
+- **Listener thread** — blocks on `sock.recvfrom()` waiting for incoming datagrams. Any received `peer_hello` from a different peer ID is immediately added to the `PEERS` registry via `upsert_peer()`.
 
-### Encryption
+UDP is used instead of TCP because:
+- UDP is **connectionless** — no handshake overhead, no connection state to maintain per peer
+- **Broadcast** is only possible with UDP; TCP requires a known destination address
+- Packet loss is acceptable — if one hello is dropped, the next arrives in 5 seconds
 
-Two independent encryption layers:
+Each `peer_hello` carries `peer_id`, `host`, `port`, and a `digest` (SHA-256 of the current catalog). The digest lets a peer know immediately whether the sender's catalog has changed without fetching the full manifest.
 
-| Layer | Key source | Scope |
+Peers that haven't sent a `peer_hello` in `PEER_TTL_SECONDS` (45 s) are considered dead. `cleanup_inactive_peers()` removes them from `PEERS` and strips their chunk ownership from `CATALOG` so the dashboard stops showing them as available sources.
+
+---
+
+### 2. Bootstrap and Manifest Sync — Gossip Protocol
+
+**PDC concept: decentralized information dissemination, eventual consistency**
+
+UDP broadcast only reaches the local subnet. For VPN setups or multi-network deployments, explicit `BOOTSTRAP_PEERS` provide a TCP entry point.
+
+Every `MANIFEST_INTERVAL_SECONDS` (8 s) the **manifest sync loop** runs:
+1. Builds a list of all known peers plus any bootstrap candidates.
+2. Shuffles the list randomly — this distributes sync load evenly and avoids thundering herd patterns.
+3. For each peer, calls `sync_manifest(peer)`:
+   - `GET /manifest` pulls that peer's full manifest (peer list + file catalog).
+   - `merge_manifest()` integrates new peers and new file/chunk data into the local state.
+   - `POST /manifest` pushes the local manifest back to the same peer (bidirectional exchange in one round trip).
+
+This is a simplified **gossip protocol**: each node periodically exchanges state with a random subset of known nodes. Information propagates across the network within a few sync cycles even if no two nodes share a direct connection initially — a new peer that knows only Peer A will learn about Peer B within one sync cycle if Peer A's manifest includes Peer B.
+
+**Eventual consistency**: there is no global coordinator. All peers converge to the same view of the network over time through repeated bilateral exchanges. A new file uploaded to Peer A appears on Peer C's dashboard within ~16 seconds (two sync cycles), even if A and C never communicated directly.
+
+---
+
+### 3. File Chunking — Data Parallelism
+
+**PDC concept: data decomposition, parallel I/O**
+
+`chunk_file()` in `chunking.py` reads the source file in 512 KB blocks and writes each block as a separate `.chunk` file under `data/chunks/<file_hash>/`. Each chunk records its index, SHA-256 hash, and byte size.
+
+Chunking enables two things:
+
+1. **Parallel download** — different chunks can be fetched from different peers simultaneously (see section 4).
+2. **Partial availability** — a peer that has downloaded only some chunks is already a valid source for those chunks. The file does not need to be complete before it can be shared. This means a swarm of peers can all download a large file simultaneously while simultaneously helping each other.
+
+The file's SHA-256 hash is computed over the entire file before chunking and serves as the permanent network identity. This is content-addressed storage: the hash is the name. Two files with identical content have the same hash and are deduplicated automatically.
+
+---
+
+### 4. Parallel Chunk Downloads — Thread Pool
+
+**PDC concept: task parallelism, ThreadPoolExecutor, concurrent futures**
+
+`download_file()` uses Python's `ThreadPoolExecutor` with `max_workers=4`:
+
+```
+for each missing chunk:
+    find candidate peers that hold this chunk
+    submit fetch_chunk_from_candidates() as a Future
+    
+for future in as_completed(futures):
+    collect result or record error
+```
+
+`as_completed()` yields futures as they finish, not in submission order — so a fast peer's result is processed immediately without waiting for a slower peer to finish its chunk. This is **non-blocking result collection**.
+
+Each `fetch_chunk()` call:
+1. Issues a `GET /chunk` HTTP request to the selected peer.
+2. Base64-decodes the response body.
+3. AES-256-GCM decrypts the data (transit key).
+4. SHA-256 verifies the decrypted bytes against the expected chunk hash.
+5. Writes the chunk to disk.
+6. Calls `add_own_chunk()` to register local ownership under `CATALOG_LOCK`.
+
+If a peer fails mid-download, `remove_peer()` is called and the chunk is retried on the next available candidate. The system degrades gracefully — as long as at least one peer holds a chunk, the download completes.
+
+**Chunk rotation**: candidate peers for each chunk are sorted by peer ID and then rotated by chunk position index. This spreads download load across peers rather than hammering one peer for all chunks.
+
+---
+
+### 5. Mutual Exclusion — Mutex Design
+
+**PDC concept: mutual exclusion, deadlock prevention, lock granularity**
+
+The server is fully multi-threaded (`ThreadingHTTPServer` — each HTTP request runs in its own thread). Multiple threads can simultaneously handle chunk downloads, manifest syncs, uploads, deletes, and dashboard polls. Without synchronization, concurrent writes to shared state produce race conditions.
+
+Three levels of locking protect shared state:
+
+#### `PEERS_LOCK` — threading.Lock()
+Guards the `PEERS` dictionary. Acquired for reads and writes to peer registration (`upsert_peer`, `remove_peer`, `cleanup_inactive_peers`). Held for the shortest possible time — only dictionary access, never I/O.
+
+#### `CATALOG_LOCK` — threading.Lock()
+Guards `CATALOG` (file metadata and chunk ownership), `DELETED_HASHES` (tombstone set), and `SHARING_PAUSED` (pause set). All three are modified atomically together so no thread sees a half-updated state.
+
+**Critical design decision**: file I/O (writing manifest JSON to disk, writing chunk files) is always performed **outside** `CATALOG_LOCK`. Only a snapshot of the needed data is taken under the lock, then the lock is released before touching the filesystem. Holding a mutex during disk I/O would block every other thread — chunk downloads, API responses, manifest syncs — for the entire duration of the write.
+
+```python
+# Pattern used throughout peer.py:
+with CATALOG_LOCK:
+    manifest_snapshot = json.loads(json.dumps(file_info))  # deep copy under lock
+# lock released — now safe to write to disk without blocking other threads
+persist_file_manifest(manifest_snapshot)
+```
+
+#### `_file_dl_locks[hash]` — per-file threading.Lock()
+A separate lock is created on demand for each file hash being downloaded. This serializes concurrent `/download` requests for the **same file** — if two users click download simultaneously, one waits rather than both racing to write chunks and assemble the output file. Different files download in parallel without contention.
+
+This is a **double-checked lock pattern**:
+```python
+with _file_dl_locks_mu:           # guards the dict itself
+    if hash not in _file_dl_locks:
+        _file_dl_locks[hash] = threading.Lock()
+    return _file_dl_locks[hash]
+```
+
+#### Deadlock Prevention — Lock Ordering
+
+Deadlock occurs when Thread A holds Lock 1 and waits for Lock 2, while Thread B holds Lock 2 and waits for Lock 1 — circular wait, both blocked forever.
+
+The fix is a **strict global acquisition order**: any code that needs both locks must always acquire `PEERS_LOCK` first, then `CATALOG_LOCK`. This eliminates circular wait because no thread ever holds `CATALOG_LOCK` while waiting for `PEERS_LOCK`.
+
+`remove_peer()` demonstrates this explicitly — it acquires and releases each lock separately rather than nesting them, because the two operations (removing from `PEERS` and removing from `CATALOG`) are independent:
+
+```python
+def remove_peer(peer_id):
+    with PEERS_LOCK:
+        PEERS.pop(peer_id, None)
+    with CATALOG_LOCK:                        # acquired after PEERS_LOCK is released
+        for file_info in CATALOG.values():
+            file_info.get("peers", {}).pop(peer_id, None)
+```
+
+#### `MESSAGES_LOCK` — threading.Lock()
+Guards the `MESSAGES` list. Simple reader-writer pattern — the list is appended to by incoming `/message` POST requests and read by `/messages` GET requests, which can happen concurrently.
+
+---
+
+### 6. Distributed File Catalog — Shared State Without a Central Server
+
+**PDC concept: distributed shared state, replication, conflict resolution**
+
+Every peer maintains its own in-memory `CATALOG` — a dictionary keyed by file hash, storing file metadata and a map of which peers own which chunks. There is no database and no central authority.
+
+`merge_manifest()` is the reconciliation function. When a peer receives another peer's manifest it:
+
+1. **Upserts peer records** — new peers are added, known peers get their `last_seen` updated.
+2. **Merges file entries** — for each file in the incoming manifest, `add_file_to_catalog()` is called. `setdefault` ensures existing entries are not overwritten wholesale — only missing fields are filled in.
+3. **Conflict detection** — if the same file hash appears with different chunk metadata (different sizes or hashes), it is rejected with a `ValueError`. The hash is the content identity; different content means a different file.
+4. **Stale ownership removal** — after processing all files, the function computes the set of hashes the advertising peer currently claims. Any file the advertising peer previously claimed but no longer includes is stripped of that peer's ownership entry. This is how deletions propagate: once a peer deletes a file and stops advertising it, other peers stop listing it as a source within one sync cycle.
+
+**Tombstones** (`DELETED_HASHES`): when a file is deleted locally, its hash is added to this set permanently (for the lifetime of the process). `add_file_to_catalog()` checks this set first — if the hash is tombstoned, the entry is silently ignored. This prevents manifest sync from resurrecting files the user explicitly chose to remove.
+
+**Manifest persistence**: each time a file entry changes, `persist_file_manifest()` writes a JSON file to `data/manifests/`. On startup, `restore_local_manifests()` reads these files and re-registers all files the peer owns. This means chunk ownership survives process restart without needing to re-download anything.
+
+---
+
+### 7. Encryption — Two-Layer Security
+
+**PDC concept: secure communication in distributed systems**
+
+#### Layer 1 — Transit Encryption (chunk transfer)
+
+All chunk data sent between peers is encrypted with **AES-256-GCM** using a key derived from the shared `PEER_PASSPHRASE`. This protects chunks in flight from eavesdroppers on the network.
+
+- The sender calls `encrypt(raw_bytes, ENCRYPTION_KEY)` before base64-encoding and sending.
+- The receiver base64-decodes, then calls `decrypt(data, ENCRYPTION_KEY)` before verifying the chunk hash.
+- If `PEER_PASSPHRASE` is empty, encryption is skipped (useful for local testing).
+
+Messages between peers use the same key and same encrypt/decrypt functions.
+
+#### Layer 2 — Per-File Content Encryption
+
+Optional. Set at upload time by providing a `file_password`.
+
+- Before chunking, the entire file is encrypted: `encrypt(file_bytes, derive_key(file_password))`.
+- The encrypted blob is what gets chunked and distributed. Peers that download and assemble the chunks get ciphertext, not the original file.
+- After assembly, the downloader must supply the correct password. `decrypt(assembled_bytes, derive_key(file_password))` produces the original file. A wrong password raises an exception; the assembled ciphertext is deleted.
+- The `password_protected: true` flag is stored in the manifest and propagated to all peers so their dashboards show the lock icon — but the password itself is never stored or transmitted.
+
+#### Key Derivation — PBKDF2-SHA256
+
+Raw passphrases are not used directly as AES keys. `derive_key()` in `crypto.py` runs PBKDF2-SHA256 with 100,000 iterations and a fixed salt (`pdc-p2p-v1`) to produce a 32-byte (256-bit) key. The high iteration count makes brute-forcing the passphrase computationally expensive.
+
+```python
+def derive_key(passphrase: str) -> bytes:
+    return hashlib.pbkdf2_hmac('sha256', passphrase.encode('utf-8'), b'pdc-p2p-v1', 100_000, dklen=32)
+```
+
+#### AES-256-GCM Properties
+
+- **Authenticated encryption** — GCM mode produces an authentication tag. If any byte of the ciphertext is modified in transit, decryption fails with an exception (not silently corrupted data).
+- **Random nonce** — a fresh 12-byte nonce is generated for every `encrypt()` call using `os.urandom(12)`. The nonce is prepended to the ciphertext so the receiver can extract it. Reusing a nonce with the same key would break GCM security — the random generation ensures this never happens.
+
+---
+
+### 8. Access Control — Distributed Policy Enforcement
+
+**PDC concept: distributed authorization without a central authority**
+
+#### Peer Restriction
+
+When a file is uploaded with `allowed_peers`, the list is stored in the catalog and propagated in every manifest. When any peer receives a `/chunk` request it checks the requester's `peer_id` against `allowed_peers` before serving data:
+
+```python
+if _allowed and requesting_peer_id not in _allowed:
+    send_json(self, HTTPStatus.FORBIDDEN, {"error": "access denied"})
+    return
+```
+
+The requesting peer sends its own `PEER_ID` as a query parameter. This is an honor-system check — a malicious client could send a spoofed peer ID. For a trusted-network classroom demo, this is sufficient; production systems would use cryptographic peer identity (certificates or public keys).
+
+#### Sharing Pause
+
+`SHARING_PAUSED` is an in-memory set of file hashes this peer has voluntarily stopped serving. It is checked in the `/chunk` handler alongside the `allowed_peers` check. Unlike deletion, it does not remove any data and is not persisted — a peer restart clears all pauses and files are re-advertised automatically.
+
+The pause is reflected in the snapshot returned by `/files` and `/manifest`: when a file is paused, this peer's ownership entry is omitted from the `peers` dict (but `local_chunks` still reflects disk reality). Other peers see the count drop to zero for this source within one manifest sync cycle and stop routing chunk requests here.
+
+---
+
+### 9. Deletion and Tombstoning — Distributed Garbage Collection
+
+**PDC concept: distributed state removal, tombstone pattern**
+
+Deleting a distributed resource is harder than deleting a local one. If Peer A deletes a file but Peer B still has it in its catalog, the next manifest exchange would re-add the file to Peer A's catalog — the delete would be undone.
+
+The solution is a **tombstone**: when a file is deleted, its hash is added to `DELETED_HASHES` and never removed. `add_file_to_catalog()` checks this set at the top and returns immediately if the hash is tombstoned, so no manifest from any peer can resurrect it.
+
+The delete also:
+- Removes the entry from `CATALOG` (under `CATALOG_LOCK`)
+- Adds to `DELETED_HASHES` (under the same `CATALOG_LOCK` — atomically together)
+- Deletes chunk files from `data/chunks/<hash>/`
+- Deletes the manifest JSON from `data/manifests/`
+- Deletes the original file from `data/shared/`
+
+Other peers learn the file is gone via the stale ownership removal in `merge_manifest()`: once this peer stops advertising the file, other peers remove it as a source. If no other peer has the file, it eventually shows as "Unavailable" everywhere.
+
+---
+
+### 10. Messaging — Direct Peer-to-Peer Communication
+
+**PDC concept: point-to-point message passing, no relay**
+
+Unlike file chunks which are served on demand, messages are **pushed** directly from sender to receiver:
+
+1. The sender calls `POST /send_message` on its own peer with `{to_peer_id, text}`.
+2. `peer.py` looks up the recipient's address in `PEERS`.
+3. The text is encrypted with AES-256-GCM (same transit key as chunks).
+4. The ciphertext is hex-encoded and sent as `POST /message` directly to the recipient's HTTP server.
+5. The recipient decrypts and appends to its `MESSAGES` list under `MESSAGES_LOCK`.
+6. The React dashboard polls `GET /messages` every 2 seconds and merges received messages with locally-tracked sent messages (sorted by timestamp).
+
+**Optimistic UI**: sent messages are added to React state immediately without waiting for the poll cycle, so the chat feels instant. The message is shown with `direction: 'sent'` and the recipient's peer ID so the per-peer conversation filter works correctly.
+
+Messages are **in-memory only** — they do not survive a peer restart. This is an intentional design choice that keeps the implementation simple and avoids any persistence or replay concerns.
+
+---
+
+### 11. Frontend Polling — Simulated Real-Time Updates
+
+**PDC concept: client-side state synchronization in a distributed system**
+
+The React frontend has no persistent connection to `peer.py` (no WebSocket). Instead, `usePolling.ts` runs `setInterval` loops that repeatedly call the REST API:
+
+| Endpoint polled | Interval | Reason |
 |---|---|---|
-| **Transit** | `PEER_PASSPHRASE` env var (shared across all peers) | Every chunk sent over HTTP — protects in-flight data |
-| **Per-file** | Password entered at upload time | Encrypts file content before chunking — only the correct password decrypts the assembled file |
+| `/health` | 2 s | Detect peer.py restart; get current peer ID |
+| `/files`, `/peers`, `/local` | 3 s idle / 500 ms active | 500 ms during downloads keeps the progress bar smooth |
+| `/messages` | 2 s | Near-real-time chat feel |
 
-Both use **AES-256-GCM** with a **PBKDF2-SHA256** key derived from the passphrase (100,000 iterations, salt `pdc-p2p-v1`). Implementation in `src/crypto.py`.
+The fast poll during downloads is triggered by watching the `downloading` Set in React state — when it is non-empty, the interval drops to 500 ms automatically, then returns to 3 s when the download completes.
 
-### Access Control
-
-| Control | How to set | Effect |
-|---|---|---|
-| **Peer restriction** | Check peers in Access controls at upload | Chunk requests from unlisted peers get `403 Forbidden` |
-| **File password** | Enter password in Access controls at upload | File content is AES-256-GCM encrypted; peers must supply the password to assemble it |
-| **Stop sharing** | Click pause button in dashboard | Chunks stay on disk; all `/chunk` requests for this file return `403`; reversible |
-
-### Sharing Pause vs Delete
-
-| Action | Chunks on disk | Peers can download | Reversible |
-|---|---|---|---|
-| Stop sharing | Yes | No (`403`) | Yes — click Resume |
-| Delete | No (wiped) | Only if other peers have it | No — hash tombstoned |
-
-Deleted file hashes are added to `DELETED_HASHES`. Manifest sync never re-adds tombstoned files, even if other peers advertise them.
-
-### Messaging
-
-Each peer exposes `/send_message` and `/message` endpoints. When you send a message:
-1. The text is UTF-8 encoded and **AES-256-GCM encrypted** with the shared passphrase.
-2. The ciphertext (hex) is POSTed directly to the recipient peer's `/message` endpoint.
-3. The recipient decrypts it and stores it in memory.
-4. The React dashboard polls `/messages` every 2 seconds and displays a per-peer chat view — sent messages on the right (blue bubbles), received on the left (gray bubbles).
-
-### Concurrency Design
-
-The server is fully multi-threaded (`ThreadingHTTPServer`). Three levels of locking:
-
-| Lock | Protects | Acquisition order |
-|---|---|---|
-| `PEERS_LOCK` | `PEERS` dict | Always first |
-| `CATALOG_LOCK` | `CATALOG`, `DELETED_HASHES`, `SHARING_PAUSED` | Always second |
-| `_file_dl_locks[hash]` | per-file chunk write + assemble | Acquired after CATALOG_LOCK is released |
-
-The strict `PEERS_LOCK → CATALOG_LOCK` order eliminates circular wait (deadlock). File I/O (chunk writes, manifest saves) always happens **outside** `CATALOG_LOCK` to avoid blocking the entire server on disk operations.
-
-### Frontend Polling
-
-| Data | Interval | Notes |
-|---|---|---|
-| Health / peer ID | 2 s | |
-| Files + peers + local | 3 s normal, 500 ms during download | Fast polling keeps progress bar smooth |
-| Messages | 2 s | |
+This polling architecture is **stateless on the server side** — the server never pushes events, never tracks client sessions, and each response is a complete snapshot of current state. This matches the REST model and keeps `peer.py` simple.
 
 ---
 

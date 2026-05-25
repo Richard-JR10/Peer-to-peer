@@ -325,6 +325,11 @@ def merge_manifest(manifest, source_peer=None):
             advertised_hashes.add(file_info["file_hash"])
 
     for file_info in manifest.get("files", []):
+        # If the file is restricted, only accept it when we are on the allowed list.
+        # This prevents restricted files from appearing in non-allowed peers' dashboards.
+        allowed = file_info.get("allowed_peers", [])
+        if allowed and PEER_ID not in allowed:
+            continue
         for peer_id, owner in file_info.get("peers", {}).items():
             try:
                 add_file_to_catalog(
@@ -334,7 +339,7 @@ def merge_manifest(manifest, source_peer=None):
                     file_info["chunks"],
                     peer_id,
                     owner.get("chunks", []),
-                    allowed_peers=file_info.get("allowed_peers", []),
+                    allowed_peers=allowed,
                     password_protected=file_info.get("password_protected", False),
                 )
             except ValueError as exc:
@@ -669,6 +674,14 @@ def download_file(file_hash, file_password=""):
                 decrypted = decrypt(output.read_bytes(), file_key)
             except Exception:
                 output.unlink(missing_ok=True)
+                # Remove the chunks we just downloaded so the file goes back to
+                # "Available" and the user can retry with the correct password.
+                chunk_dir = CHUNKS_DIR / file_hash
+                if chunk_dir.exists():
+                    shutil.rmtree(chunk_dir)
+                with CATALOG_LOCK:
+                    if file_hash in CATALOG:
+                        CATALOG[file_hash]["peers"].pop(PEER_ID, None)
                 raise ValueError("wrong password")
             output.write_bytes(decrypted)
 
