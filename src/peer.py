@@ -2,9 +2,11 @@ import base64
 import hashlib
 import json
 import os
+import platform
 import random
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -992,6 +994,34 @@ class PeerHandler(BaseHTTPRequestHandler):
                 file_hash = payload.get("file_hash", "").strip()
                 with CATALOG_LOCK:
                     SHARING_PAUSED.discard(file_hash)
+                send_json(self, HTTPStatus.OK, {"ok": True})
+            except Exception as exc:
+                send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/open_local":
+            try:
+                payload = read_json(self)
+                file_hash = payload.get("file_hash", "").strip()
+                with CATALOG_LOCK:
+                    _fi = CATALOG.get(file_hash)
+                    file_name = Path(_fi["name"]).name if _fi else ""
+                if not file_name:
+                    send_json(self, HTTPStatus.NOT_FOUND, {"error": "file not known"})
+                    return
+                # Prefer the assembled download; fall back to the original shared file.
+                file_path = DOWNLOADS_DIR / file_name
+                if not file_path.exists():
+                    file_path = SHARED_DIR / file_name
+                if not file_path.exists():
+                    send_json(self, HTTPStatus.NOT_FOUND, {"error": "file not available on this peer"})
+                    return
+                system = platform.system()
+                if system == "Windows":
+                    subprocess.Popen(["explorer", "/select,", str(file_path)])
+                elif system == "Darwin":
+                    subprocess.Popen(["open", "-R", str(file_path)])
+                else:
+                    subprocess.Popen(["xdg-open", str(file_path.parent)])
                 send_json(self, HTTPStatus.OK, {"ok": True})
             except Exception as exc:
                 send_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})

@@ -69,6 +69,13 @@ export const resumeSharing = (file_hash: string): Promise<{ ok: boolean }> =>
     body: JSON.stringify({ file_hash }),
   })
 
+export const openLocal = (file_hash: string): Promise<{ ok: boolean }> =>
+  apiFetch('/open_local', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_hash }),
+  })
+
 export function postUpload(
   file: File,
   onProgress?: (pct: number) => void,

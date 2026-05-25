@@ -10,7 +10,7 @@ set PEER_ADVERTISE_HOST=100.102.71.92
 set PEER_PORT=9000
 set DISCOVERY_PORT=9999
 set DATA_DIR=data\peer1
-set BOOTSTRAP_PEERS=100.80.161.84:9000
+set BOOTSTRAP_PEERS=100.80.161.84:9000,100.74.1.15:9000
 set PEER_PASSPHRASE=pdc-demo-key
 
 REM ============================================================

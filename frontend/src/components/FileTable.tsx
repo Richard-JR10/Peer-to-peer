@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { NetworkFile } from '../types'
 import { getFileStatus, formatBytes, truncateHash } from '../types'
+import { openLocal } from '../api'
 
 interface FileTableProps {
   files: NetworkFile[]
@@ -262,7 +263,17 @@ export default function FileTable({ files, downloading, onDownload, onDelete, on
                           </div>
                         </div>
                       ) : status === 'Downloaded' ? (
-                        <span className="text-xs text-slate-600">—</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); openLocal(file.file_hash).catch(() => {}) }}
+                          title="Show file in folder"
+                          className="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium bg-green-900/30 text-green-400 hover:bg-green-900/50 border border-green-900 transition-colors"
+                        >
+                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                          Open
+                        </button>
                       ) : (
                         <div className="flex items-center gap-1.5">
                           {file.password_protected && (
