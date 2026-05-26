@@ -1,3 +1,4 @@
+import axios from 'axios'
 import type {
   HealthResponse,
   NetworkFile,
@@ -8,100 +9,65 @@ import type {
   Message,
 } from './types'
 
-const BASE = '/api'
+const api = axios.create({ baseURL: '/api' })
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, init)
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error((body as { error?: string }).error ?? res.statusText)
+// Unwrap axios error bodies into plain Error so callers get a readable message.
+api.interceptors.response.use(
+  res => res,
+  err => {
+    const message = err.response?.data?.error ?? err.message
+    return Promise.reject(new Error(message))
   }
-  return res.json() as Promise<T>
-}
+)
 
 export const getHealth = (): Promise<HealthResponse> =>
-  apiFetch('/health')
+  api.get('/health').then(r => r.data)
 
 export const getFiles = (): Promise<{ files: NetworkFile[] }> =>
-  apiFetch('/files')
+  api.get('/files').then(r => r.data)
 
 export const getPeers = (): Promise<{ peers: Peer[] }> =>
-  apiFetch('/peers')
+  api.get('/peers').then(r => r.data)
 
 export const getLocal = (): Promise<LocalFiles> =>
-  apiFetch('/local')
-
-export const postDownload = (file_hash: string, file_password?: string): Promise<DownloadResult> =>
-  apiFetch('/download', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_hash, ...(file_password ? { file_password } : {}) }),
-  })
-
-export const deleteFile = (file_hash: string): Promise<{ ok: boolean }> =>
-  apiFetch('/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_hash }),
-  })
+  api.get('/local').then(r => r.data)
 
 export const getMessages = (): Promise<{ messages: Message[] }> =>
-  apiFetch('/messages')
+  api.get('/messages').then(r => r.data)
+
+export const postDownload = (file_hash: string, file_password?: string): Promise<DownloadResult> =>
+  api.post('/download', { file_hash, ...(file_password ? { file_password } : {}) }).then(r => r.data)
+
+export const deleteFile = (file_hash: string): Promise<{ ok: boolean }> =>
+  api.post('/delete', { file_hash }).then(r => r.data)
 
 export const sendMessage = (to_peer_id: string, text: string): Promise<{ ok: boolean }> =>
-  apiFetch('/send_message', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ to_peer_id, text }),
-  })
+  api.post('/send_message', { to_peer_id, text }).then(r => r.data)
 
 export const stopSharing = (file_hash: string): Promise<{ ok: boolean }> =>
-  apiFetch('/stop_sharing', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_hash }),
-  })
+  api.post('/stop_sharing', { file_hash }).then(r => r.data)
 
 export const resumeSharing = (file_hash: string): Promise<{ ok: boolean }> =>
-  apiFetch('/resume_sharing', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_hash }),
-  })
+  api.post('/resume_sharing', { file_hash }).then(r => r.data)
 
 export const openLocal = (file_hash: string): Promise<{ ok: boolean }> =>
-  apiFetch('/open_local', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_hash }),
-  })
+  api.post('/open_local', { file_hash }).then(r => r.data)
 
-export function postUpload(
+export async function postUpload(
   file: File,
   onProgress?: (pct: number) => void,
   allowedPeers?: string[],
   filePassword?: string
 ): Promise<UploadResult> {
-  return new Promise((resolve, reject) => {
-    const params = new URLSearchParams({ name: file.name })
-    if (allowedPeers?.length) params.set('allowed_peers', allowedPeers.join(','))
-    if (filePassword) params.set('file_password', filePassword)
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${BASE}/upload?${params.toString()}`)
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-    if (onProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
-      }
-    }
-    xhr.onload = () => {
-      try {
-        const data = JSON.parse(xhr.responseText)
-        if (xhr.status >= 200 && xhr.status < 300) resolve(data)
-        else reject(new Error(data.error ?? xhr.statusText))
-      } catch { reject(new Error(xhr.statusText)) }
-    }
-    xhr.onerror = () => reject(new Error('Upload failed'))
-    xhr.send(file)
+  const params = new URLSearchParams({ name: file.name })
+  if (allowedPeers?.length) params.set('allowed_peers', allowedPeers.join(','))
+  if (filePassword) params.set('file_password', filePassword)
+
+  const res = await api.post<UploadResult>(`/upload?${params}`, file, {
+    headers: { 'Content-Type': 'application/octet-stream' },
+    onUploadProgress: e => {
+      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+    },
   })
+  return res.data
 }
