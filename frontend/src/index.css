@@ -1,6 +1,13 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #0d0d0d;
+  --color-card: #111111;
+  --color-border: #1a2a4a;
+  --color-accent: #3b82f6;
+  --color-accent-hover: #2563eb;
+  --color-accent-dim: #1d3a6e;
+}
 
 @layer base {
   * {
